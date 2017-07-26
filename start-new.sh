@@ -9,4 +9,4 @@ docker run -d \
    --volume $DIR/src:/src \
    -e DMON_API=$DMON_API \
    -e CENT_WS=$CENT_WS \
-   dmon-perl-client perl /src/run.pl
+   dmon-perl-client /bin/sh -c 'cd /src; perl run.pl'

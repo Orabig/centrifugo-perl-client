@@ -10,6 +10,9 @@ use JSON;
 use Config::JSON;
 use REST::Client;
 
+use Centrifugo::Client;
+
+my $PING_INTERVAL=3;
 our $CONFIG="/tmp/config.json";
 our $SERVER_BASE_API=$ENV{"DMON_API"};
 our $CENTRIFUGO_WS=$ENV{"CENT_WS"};
@@ -20,14 +23,10 @@ my $USER_ID = "First_User_12345";
 my $TIMESTAMP = time();
 my $TOKEN;
 
-
-
 our $HOST_ID;
-our $CLIENT_ID;
 
-our $webSocketHandle;
 our $mainEventLoop;
-
+our $centrifugoClientHandle;
 
 
 # Initialize the monitor
@@ -36,14 +35,51 @@ init();
 # Ask for a client token
 $TOKEN = askForToken($USER_ID,$TIMESTAMP);
 
-# For now : loop and ping the server every 10 s
-makeEventPingServerEvery(10);
+# Connects to Centrifugo
+makeEventListening();
 
 # Start the event loop
 AnyEvent->condvar->recv;
+exit;
+
+
 
 ###########################################################
 #   makeEvent* subs are launching tasks in the event loop
+
+sub makeEventListening {
+	$centrifugoClientHandle = Centrifugo::Client->new("$CENTRIFUGO_WS/connection/websocket",
+		debug => 'true',
+		ws_params => {
+			ssl_no_verify => 'true',
+			timeout => 600
+	});
+
+	$centrifugoClientHandle->connect(
+		user => $USER_ID,
+		timestamp => $TIMESTAMP,
+		token => $TOKEN
+	) -> on('connect', sub{
+		my ($infoRef)=@_;
+		print "Connected to Centrifugo version ".$infoRef->{version};
+		
+		# When connected, client_id() is define, so we can subscribe to our private channel
+		$centrifugoClientHandle->subscribe( '&'.$centrifugoClientHandle->client_id() );
+				
+		# For now : loop and ping the server every 10 s
+		makeEventPingServerEvery($PING_INTERVAL);
+		
+	})-> on('message', sub{
+		my ($infoRef)=@_;
+		print "MESSAGE: ".encode_json $infoRef->{data};
+		if ($infoRef->{data}->{message} eq 'COMMAND') {
+			# ACK to console (via ACK PHP)					
+			serverAck( $SERVER_BASE_API  );
+		}
+	})-> on('disconnect', sub {
+		undef $centrifugoClientHandle;
+	});
+}
 
 # Creates an event to ping the server every X minutes
 sub makeEventPingServerEvery {
@@ -73,83 +109,6 @@ sub askForToken {
 		return($token);
 	}
 	print "ERROR < No websocket token";
-}
-
-#
-sub makeEventListening {
-	AnyEvent::WebSocket::Client -> new(
-		ssl_no_verify => 'true',
-		timeout => 600
-		) -> connect("$CENTRIFUGO_WS/connection/websocket") -> cb(sub {
-
-		$webSocketHandle = eval { shift->recv };
-		if($@) {
-			# handle error...
-			warn $@;
-			return;
-		}
-		
-		# Send CONNECT message
-		my $CONNECT=encode_json {
-			UID => 'anyId',
-			method => 'connect',
-			params => {
-				user => $USER_ID,
-				timestamp => "$TIMESTAMP", # this MUST be a string
-				token => $TOKEN
-			}
-		};
-		print "WEBSOCKET > $CONNECT";
-		$webSocketHandle->send($CONNECT);
-
-		# receive message from the websocket...
-		$webSocketHandle->on(each_message => sub {
-			my($loop, $message) = @_;
-			print "WEBSOCKET < ".$message->{body};
-			my $body = decode_json($message->{body});
-			if ($body->{method} eq 'connect') {
-				# onConnect => SUBSCRIBE CHANNEL
-				
-				$CLIENT_ID = $body->{body}->{client};
-				print "Connected to WS : CLIENT_ID='$CLIENT_ID'";
-				my $SUBSCRIBE = encode_json {
-					UID => 'anyId',
-					method => 'subscribe',
-					params => { channel => "&".$CLIENT_ID }
-				};
-				print "WEBSOCKET > $SUBSCRIBE";
-				$webSocketHandle->send($SUBSCRIBE);
-				
-			} elsif ($body->{method} eq 'message') {
-				# onMessage
-				
-				my $message = $body->{body}->{data};
-				print "GOT a message : ".encode_json $message;
-				if ($message->{message} eq 'COMMAND') {
-					# ACK to console (via ACK PHP)					
-					serverAck( $SERVER_BASE_API  );
-				}
-				
-			} elsif ($body->{method} eq 'subscribe') {
-				# onSubscribe
-			} #...
-		});
-		
-		$webSocketHandle->on(parse_error => sub {
-			my($loop, $error) = @_;
-			print "ERROR:$error";
-		});
-
-		# handle a closed connection...
-		$webSocketHandle->on(finish => sub {
-			my($loop) = @_;
-			print "Connection closed";
-			undef $webSocketHandle;
-			$CLIENT_ID='';
-		});
-
-	});
-	
 }
 
 ###########################################################
@@ -184,7 +143,7 @@ sub serverPing {
 	my ($API)=@_;
 	my $client = REST::Client->new();
 	$client->setHost($API);
-	
+	my $CLIENT_ID = $centrifugoClientHandle ? $centrifugoClientHandle->client_id() : '';
 	my $POST = qq!api-key=${API_KEY}&host-id=${HOST_ID}&client-id=${CLIENT_ID}!;
 	$client->POST("/ping.php", $POST, { 'Content-type' => 'application/x-www-form-urlencoded'});
 	print "POST > $POST";
@@ -201,7 +160,7 @@ sub serverAck {
 	my ($API)=@_;
 	my $client = REST::Client->new();
 	$client->setHost($API);
-	
+	my $CLIENT_ID = $centrifugoClientHandle->client_id();
 	my $POST = qq!api-key=${API_KEY}&host-id=${HOST_ID}&client-id=${CLIENT_ID}!;
 	$client->POST("/ack.php", $POST, { 'Content-type' => 'application/x-www-form-urlencoded'});
 	print "ACK > $POST";
@@ -210,13 +169,13 @@ sub serverAck {
 
 # This takes the output of ping sent to the server, and interprets them as command if possible
 sub processServerCommand {
-	$_ = shift;
-	if (/^LISTEN ON/ && not defined $webSocketHandle) {
+	$_ = shift;print "centrifugoClientHandle=$centrifugoClientHandle";
+	if (/^LISTEN ON/ && not defined $centrifugoClientHandle) {
 		print "received command : LISTEN ON : listening";
 		makeEventListening();	
 	}
-	if (/^LISTEN OFF/ && defined $webSocketHandle) {
+	if (/^LISTEN OFF/ && defined $centrifugoClientHandle) {
 		print "received command : LISTEN OFF : closing connection";
-		$webSocketHandle->close();
+		$centrifugoClientHandle->disconnect();
 	}
 }
