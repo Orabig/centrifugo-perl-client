@@ -6,6 +6,7 @@ DMON_API="$(grep DMON_API /etc/dmon.config | awk -F= '{print $2}')"
 CENT_WS="$(grep CENT_WS /etc/dmon.config | awk -F= '{print $2}')"
 
 docker run -d \
+   --restart=always \
    --volume $DIR/src:/src \
    -e DMON_API=$DMON_API \
    -e CENT_WS=$CENT_WS \

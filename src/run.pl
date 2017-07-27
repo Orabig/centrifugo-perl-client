@@ -12,7 +12,7 @@ use REST::Client;
 
 use Centrifugo::Client;
 
-my $PING_INTERVAL=3;
+my $PING_INTERVAL=10;
 our $CONFIG="/tmp/config.json";
 our $SERVER_BASE_API=$ENV{"DMON_API"};
 our $CENTRIFUGO_WS=$ENV{"CENT_WS"};
@@ -71,11 +71,7 @@ sub makeEventListening {
 		
 	})-> on('message', sub{
 		my ($infoRef)=@_;
-		print "MESSAGE: ".encode_json $infoRef->{data};
-		if ($infoRef->{data}->{message} eq 'COMMAND') {
-			# ACK to console (via ACK PHP)					
-			serverAck( $SERVER_BASE_API  );
-		}
+		processServerCommand($infoRef->{data});
 	})-> on('disconnect', sub {
 		undef $centrifugoClientHandle;
 	});
@@ -88,7 +84,8 @@ sub makeEventPingServerEvery {
 		after => 0,
 		interval => $interval,
 		cb => sub {
-			serverPing( $SERVER_BASE_API , $HOST_ID );
+			my $response = sendServerNotification( 'PING', { } );
+			processServerJsonCommand($response) if $response;
 		}
 	);
 }
@@ -102,9 +99,9 @@ sub askForToken {
 	$client->POST("/token.php", $POST, { 'Content-type' => 'application/x-www-form-urlencoded'});
 	print "POST > $POST";
 	print "     < (".$client->responseCode().')';
-	my $token = $_=$client->responseContent();
-	s/^/     < /mg;
-	print;
+	my $token =my $tokenOutput=$client->responseContent();
+	$tokenOutput=~s/^/     < /mg;
+	print $tokenOutput;
 	if ($client->responseCode() eq 200) {
 		return($token);
 	}
@@ -132,44 +129,69 @@ sub openOrCreateConfigFile {
 	}
 }
 
-# TODO
-# TODO
-# TODO   Ce n'est pas le PING qui devrait envoyer les infos sur le client_id à la console, mais un ordre notify.php. Sinon, on a toujours
-#        un PING de retard
-# TODO
-# TODO
-
-sub serverPing {
-	my ($API)=@_;
+# Sends a notification to the server. The parameter is a HashRef (api-key, host-id and client-id parameters will be added here)
+sub sendServerNotification {
+	my ($type, $dataHRef)=@_;
 	my $client = REST::Client->new();
-	$client->setHost($API);
-	my $CLIENT_ID = $centrifugoClientHandle ? $centrifugoClientHandle->client_id() : '';
-	my $POST = qq!api-key=${API_KEY}&host-id=${HOST_ID}&client-id=${CLIENT_ID}!;
-	$client->POST("/ping.php", $POST, { 'Content-type' => 'application/x-www-form-urlencoded'});
-	print "POST > $POST";
-	print "     < (".$client->responseCode().')';
-	my $pingResponse = $_=$client->responseContent();
-	s/^/     < /mg;
-	print;
-	if ($client->responseCode() eq 200) {
-		processServerCommand($pingResponse);
-	}
-}
-
-sub serverAck {
-	my ($API)=@_;
-	my $client = REST::Client->new();
-	$client->setHost($API);
-	my $CLIENT_ID = $centrifugoClientHandle->client_id();
-	my $POST = qq!api-key=${API_KEY}&host-id=${HOST_ID}&client-id=${CLIENT_ID}!;
-	$client->POST("/ack.php", $POST, { 'Content-type' => 'application/x-www-form-urlencoded'});
-	print "ACK > $POST";
+	$client->setHost($SERVER_BASE_API);
+	my $CLIENT_ID = $centrifugoClientHandle ? $centrifugoClientHandle->client_id() : undef;
+	$dataHRef->{ 't' }=$type;
+	$dataHRef->{ 'api-key' }=$API_KEY;
+	$dataHRef->{ 'client-id' }=$CLIENT_ID;
+	$dataHRef->{ 'host-id' }=$HOST_ID;
+	my $POST = encode_json $dataHRef;
+	$client->POST("/msg.php", $POST, { 'Content-type' => 'application/json'});
+	print "$type > $POST";
 	print "    < (".$client->responseCode().')';
+	my $response=my $resOutput=$client->responseContent();
+	if ($response) {
+		$resOutput=~s/^/    < /mg;
+		print $resOutput;
+	}
+	return $response;
 }
 
-# This takes the output of ping sent to the server, and interprets them as command if possible
+# This takes a command expressed in JSON, sends a ACK to the server, then executes the command and
+# sends the result back to the server
+# The struct for a command is :
+# { "t":"CMD", "id":"CmdID", "cmd":"...", "args":{...} }
+# The struct for a ACK/Notification is :
+# { "t":"ACK", "id":"CmdID" } or if the JSON is invalid : { "t":"ACK", "id":null, "message":"..." }
+# the struct for a result is :
+# { "t":"RESULT", "id":"CmdID","status":"0-4", ["message":"...",] ["retcode":"...",] ["STDOUT":"...",] ["STDERR":"..."] }  
+#    (status code values are Nagios-compliant : 0=OK, 1=WARNING, 2=CRITICAL, 3=UNKNOWN, 4=PENDING)
+#     a value of 4(PENDING) means that the command is NOT finished, and that other messages will follow (partial result)
+sub processServerJsonCommand {
+	my ($jsonCmd) = shift;
+	my $command = 
+		eval {
+			decode_json $jsonCmd;
+		} or do {
+			my $error = $@;
+			sendServerNotification( 'ACK', { id => undef, message => $error });
+			return;
+		};
+		
+	processServerCommand($command);
+}
+
 sub processServerCommand {
-	$_ = shift;print "centrifugoClientHandle=$centrifugoClientHandle";
+	my ($command) = shift;
+	# Envoi d'un ACK
+	my $cmdId = $command->{id};
+	sendServerNotification( 'ACK', { id => $cmdId });
+
+	# Traitement de la commande
+	my $cmd = $command->{cmd};
+	
+	print "Received a command : $cmd";
+	
+	my $args = $command->{args};
+	# List of known commands :   RUN
+	if ('RUN' eq uc $cmd) {
+		processRunCommand($cmdId, $args);
+	}
+	
 	if (/^LISTEN ON/ && not defined $centrifugoClientHandle) {
 		print "received command : LISTEN ON : listening";
 		makeEventListening();	
@@ -179,3 +201,54 @@ sub processServerCommand {
 		$centrifugoClientHandle->disconnect();
 	}
 }
+
+# Execute a system command.
+# Output 4 values :
+# status (0=OK, 2=Error while running command)
+# retCode : return code of the command
+# stdout, stderr
+sub executeCommand {
+	my ($cmdline)=@_;
+	use IPC::Open3;
+	my $status=0; # OK
+	my $retval=0;
+	my $stdout="";
+	my $stderr="";
+	my $pid = eval {
+		open3(\*WRITER, \*READER, \*ERROR, $cmdline);
+	} or do {
+		$status=2; # CRITICAL
+		$stderr=$@;
+		$stderr=~s/^open3: +//;
+		0;
+	}; 
+	if ($pid) {
+		my $line;
+		$stdout.=$line while $line=<READER>;
+		$stderr.=$line while $line=<ERROR>;
+		waitpid( $pid, 0 ) or warn "$!";
+		$retval = $?;
+	}
+	return ($status, $retval, $stdout, $stderr);
+}
+###################### COMMANDS #######################
+
+# RUN
+# ARGS : cmdline
+sub processRunCommand {
+	my ($cmdId, $args)=@_;
+	my $cmdline = $args->{cmdline};
+	print "RUN[$cmdId]:$cmdline";
+	my($status,$retval,$stdout,$stderr) = executeCommand($cmdline);
+	my @stdout = split /\n/,$stdout;
+	my @stderr = split /\n/,$stderr;
+	sendServerNotification('RESULT', {
+		id => $cmdId,
+		cmdline => $cmdline,
+		status => $status,
+		stdout => \@stdout,
+		stderr => \@stderr,
+		retcode => $retval
+	});
+}
+

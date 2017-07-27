@@ -91,7 +91,8 @@ sub connect {
 		};
 		print STDERR "Centrifugo::Client : WS > $CONNECT\n" if $this->{DEBUG};
 		$this->{WSHANDLE}->send($CONNECT);
-		
+		#DEBUG
+		our $wsh=$this->{WSHANDLE};
 		$this->{WSHANDLE}->on(each_message => sub {
 			my($loop, $message) = @_;
 			print STDERR "Centrifugo::Client : WS < $message->{body}\n" if $this->{DEBUG};
@@ -181,84 +182,6 @@ $client->client_id() return the client_id if it is connected to Centrifugo, or u
 sub client_id {
 	my ($this)=@_;
 	$this->{CLIENT_ID};
-}
-
-1;
-__DATA__
-sub makeEventListening {
-	AnyEvent::WebSocket::Client -> new(
-		ssl_no_verify => 'true',
-		timeout => 600
-		) -> connect("$CENTRIFUGO_WS/connection/websocket") -> cb(sub {
-
-		$webSocketHandle = eval { shift->recv };
-		if($@) {
-			# handle error...
-			warn $@;
-			return;
-		}
-		
-		# Send CONNECT message
-		my $CONNECT=encode_json {
-			UID => 'anyId',
-			method => 'connect',
-			params => {
-				user => $USER_ID,
-				timestamp => "$TIMESTAMP", # this MUST be a string
-				token => $TOKEN
-			}
-		};
-		print "WEBSOCKET > $CONNECT";
-		$webSocketHandle->send($CONNECT);
-
-		# receive message from the websocket...
-		$webSocketHandle->on(each_message => sub {
-			my($loop, $message) = @_;
-			print "WEBSOCKET < ".$message->{body};
-			my $body = decode_json($message->{body});
-			if ($body->{method} eq 'connect') {
-				# onConnect => SUBSCRIBE CHANNEL
-				
-				$CLIENT_ID = $body->{body}->{client};
-				print "Connected to WS : CLIENT_ID='$CLIENT_ID'";
-				my $SUBSCRIBE = encode_json {
-					UID => 'anyId',
-					method => 'subscribe',
-					params => { channel => "&".$CLIENT_ID }
-				};
-				print "WEBSOCKET > $SUBSCRIBE";
-				$webSocketHandle->send($SUBSCRIBE);
-				
-			} elsif ($body->{method} eq 'message') {
-				# onMessage
-				
-				my $message = $body->{body}->{data};
-				print "GOT a message : ".encode_json $message;
-				if ($message->{message} eq 'COMMAND') {
-					# ACK to console (via ACK PHP)					
-					serverAck( $SERVER_BASE_API  );
-				}
-				
-			} elsif ($body->{method} eq 'subscribe') {
-				# onSubscribe
-			} #...
-		});
-		
-		$webSocketHandle->on(parse_error => sub {
-			my($loop, $error) = @_;
-			print "ERROR:$error";
-		});
-
-		# handle a closed connection...
-		$webSocketHandle->on(finish => sub {
-			my($loop) = @_;
-			print "Connection closed";
-			undef $webSocketHandle;
-			$CLIENT_ID='';
-		});
-
-	});
-	
 }
 
 1;
