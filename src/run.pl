@@ -1,6 +1,11 @@
 #!perl
 $\=$/;
 
+#
+# Le client du D-MON : une boucle principale tourne toutes les N(180) secondes
+# pour envoyer une commande "ALIVE" au serveur.
+#
+
 use strict;
 
 use AnyEvent;
@@ -12,10 +17,13 @@ use REST::Client;
 
 use Centrifugo::Client;
 
-my $PING_INTERVAL=10;
-our $CONFIG="/tmp/config.json";
+my $ALIVE_INTERVAL=10;
+our $CONFIG_FILE="/tmp/config.json";
 our $SERVER_BASE_API=$ENV{"DMON_API"};
 our $CENTRIFUGO_WS=$ENV{"CENT_WS"};
+
+my $CENTREON_PLUGINS_DIR='/var/lib/centreon-plugins';
+my $CENTREON_PLUGINS='centreon_plugins.pl';
 
 my $API_KEY = "key-123";
 
@@ -36,7 +44,7 @@ init();
 $TOKEN = askForToken($USER_ID,$TIMESTAMP);
 
 # Connects to Centrifugo
-makeEventListening();
+connectToCentrifugo();
 
 # Start the event loop
 AnyEvent->condvar->recv;
@@ -47,7 +55,7 @@ exit;
 ###########################################################
 #   makeEvent* subs are launching tasks in the event loop
 
-sub makeEventListening {
+sub connectToCentrifugo {
 	$centrifugoClientHandle = Centrifugo::Client->new("$CENTRIFUGO_WS/connection/websocket",
 		debug => 'true',
 		ws_params => {
@@ -67,7 +75,7 @@ sub makeEventListening {
 		$centrifugoClientHandle->subscribe( '&'.$centrifugoClientHandle->client_id() );
 				
 		# For now : loop and ping the server every 10 s
-		makeEventPingServerEvery($PING_INTERVAL);
+		makeServerEventLoop();
 		
 	})-> on('message', sub{
 		my ($infoRef)=@_;
@@ -77,15 +85,40 @@ sub makeEventListening {
 	});
 }
 
-# Creates an event to ping the server every X minutes
-sub makeEventPingServerEvery {
+# Creates an event to ping the server every X minutes with an "alive" event
+sub oldmakeAliveEventServerEvery { # J4ai sauvé cette fonction avant sa modification plus loin
 	my $interval = shift;
 	$mainEventLoop = AnyEvent->timer(
 		after => 0,
 		interval => $interval,
 		cb => sub {
-			my $response = sendServerNotification( 'PING', { } );
+			my $response = sendMessageToServer( 'ALIVE', { 'PERIOD', $ALIVE_INTERVAL } );
 			processServerJsonCommand($response) if $response;
+		}
+	);
+}
+
+# Creates an event to ping the server every X minutes with an "alive" event
+sub makeServerEventLoop{
+	my $config = openOrCreateConfigFile();
+	my $instancesHashRef = $config->get("instances");
+	my @instanceIDs = keys %$instancesHashRef;
+	my $instanceCheckCount = 1+@instanceIDs;
+	my $interval = int( $ALIVE_INTERVAL / $instanceCheckCount );
+	my $counter = 0;
+	$mainEventLoop = AnyEvent->timer(
+		after => 0,
+		interval => $interval,
+		cb => sub {
+			if ($counter==0) {
+				my $response = sendMessageToServer( 'ALIVE', { 'PERIOD', $interval } );
+				processServerJsonCommand($response) if $response;
+			} else {
+				my $instanceId = $instanceIDs[ $counter-1 ];
+				my $cmdline = $config->get("instances/$instanceId");
+				processInstance($instanceId, $cmdline);
+			}
+			$counter++; $counter %= $instanceCheckCount;
 		}
 	);
 }
@@ -121,16 +154,16 @@ sub init {
 }
 
 sub openOrCreateConfigFile {
-	if (-f $CONFIG) {
-		return Config::JSON->new($CONFIG);
+	if (-f $CONFIG_FILE) {
+		return Config::JSON->new($CONFIG_FILE);
 	} else {
-		print STDERR "Config file $CONFIG not found : Creating...";
-		return  Config::JSON->create($CONFIG);
+		print STDERR "Config file $CONFIG_FILE not found : Creating...";
+		return  Config::JSON->create($CONFIG_FILE);
 	}
 }
 
 # Sends a notification to the server. The parameter is a HashRef (api-key, host-id and client-id parameters will be added here)
-sub sendServerNotification {
+sub sendMessageToServer {
 	my ($type, $dataHRef)=@_;
 	my $client = REST::Client->new();
 	$client->setHost($SERVER_BASE_API);
@@ -168,7 +201,7 @@ sub processServerJsonCommand {
 			decode_json $jsonCmd;
 		} or do {
 			my $error = $@;
-			sendServerNotification( 'ACK', { id => undef, message => $error });
+			sendMessageToServer( 'ACK', { id => undef, message => $error });
 			return;
 		};
 		
@@ -179,26 +212,37 @@ sub processServerCommand {
 	my ($command) = shift;
 	# Envoi d'un ACK
 	my $cmdId = $command->{id};
-	sendServerNotification( 'ACK', { id => $cmdId });
+	sendMessageToServer( 'ACK', { id => $cmdId });
 
 	# Traitement de la commande
-	my $cmd = $command->{cmd};
-	
-	print "Received a command : $cmd";
-	
-	my $args = $command->{args};
-	# List of known commands :   RUN
-	if ('RUN' eq uc $cmd) {
-		processRunCommand($cmdId, $args);
+	my $cmd = uc $command->{cmd};
+
+	if ('CONNECT' eq $cmd) {
+		connectToCentrifugo();	
 	}
-	
-	if (/^LISTEN ON/ && not defined $centrifugoClientHandle) {
-		print "received command : LISTEN ON : listening";
-		makeEventListening();	
+	elsif ('DISCONNECT' eq $cmd) {
+		$centrifugoClientHandle->disconnect() if $centrifugoClientHandle;
 	}
-	if (/^LISTEN OFF/ && defined $centrifugoClientHandle) {
-		print "received command : LISTEN OFF : closing connection";
-		$centrifugoClientHandle->disconnect();
+	else {
+		my $cmdline = $command->{args}->{cmdline};
+		
+		# List of known commands :   RUN
+		if ('RUN' eq $cmd) {
+			if ($cmdline =~ s/^CHECK\b *//i) {
+				processCheckCommand($cmdId, $cmdline);
+			} else {
+				processRunCommand($cmdId, $cmdline);
+			}
+		}
+		elsif ('REGISTER' eq $cmd) {
+			registerCheckCommand($cmdId, $cmdline);
+		}
+		elsif ('HELP' eq $cmd) {
+			processHelpOnCheckCommand($cmdId, $cmdline);
+		}
+		else {
+			print "### ERROR : Unknown command : $cmd : $cmdline";
+		}
 	}
 }
 
@@ -231,18 +275,12 @@ sub executeCommand {
 	}
 	return ($status, $retval, $stdout, $stderr);
 }
-###################### COMMANDS #######################
 
-# RUN
-# ARGS : cmdline
-sub processRunCommand {
-	my ($cmdId, $args)=@_;
-	my $cmdline = $args->{cmdline};
-	print "RUN[$cmdId]:$cmdline";
-	my($status,$retval,$stdout,$stderr) = executeCommand($cmdline);
+sub sendResultFromCommandLine{
+	my($cmdId,$cmdline, $status,$retval,$stdout,$stderr)=@_;
 	my @stdout = split /\n/,$stdout;
 	my @stderr = split /\n/,$stderr;
-	sendServerNotification('RESULT', {
+	sendMessageToServer('RESULT', {
 		id => $cmdId,
 		cmdline => $cmdline,
 		status => $status,
@@ -250,5 +288,73 @@ sub processRunCommand {
 		stderr => \@stderr,
 		retcode => $retval
 	});
+}
+
+sub sendServiceFromCommandLine{
+	my($cmdId,$cmdline, $status,$retval,$stdout,$stderr)=@_;
+	my @stdout = split /\n/,$stdout;
+	my @stderr = split /\n/,$stderr;
+	sendMessageToServer('SERVICE', {
+		id => $cmdId,
+		cmdline => $cmdline,
+		status => $status,
+		stdout => \@stdout,
+		stderr => \@stderr,
+		retcode => $retval
+	});
+}
+
+sub sendResultErrorMessage{
+	my($cmdId,$message)=@_;
+	sendMessageToServer('RESULT', {
+		id => $cmdId,
+		stdout => [],
+		stderr => [ $message ]
+	});
+}
+
+###################### COMMANDS #######################
+
+sub processRunCommand {
+	my ($cmdId, $cmdline)=@_;
+	print "RUN[$cmdId]:$cmdline";
+	sendResultFromCommandLine($cmdId, $cmdline, executeCommand($cmdline) );
+}
+
+sub processCheckCommand {
+	my ($cmdId, $cmdline)=@_;
+	print "CHECK[$cmdId]:$cmdline";
+	$cmdline="perl $CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS $cmdline";
+	sendResultFromCommandLine($cmdId, $cmdline, executeCommand($cmdline) );
+}
+
+sub processInstance {
+	my ($iId, $cmdline)=@_;
+	print "INSTANCE[$iId]:$cmdline";
+	$cmdline="perl $CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS $cmdline";
+	sendServiceFromCommandLine($iId, $cmdline, executeCommand($cmdline) );
+}
+
+sub processHelpOnCheckCommand {
+	my ($cmdId, $cmdline)=@_;
+	unless ($cmdline =~ s/^CHECK\b *//i) {
+		sendResultErrorMessage($cmdId, "Help only works on CHECK commands");
+		return;
+	}
+	print "HELP[$cmdId]:$cmdline";
+	$cmdline="perl $CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS --help $cmdline";
+	sendResultFromCommandLine($cmdId, $cmdline, executeCommand($cmdline) );
+}
+
+sub registerCheckCommand {
+	my ($cmdId, $cmdline)=@_;
+	print "REGISTER[$cmdId]:$cmdline";
+	my $instanceId = $cmdline; $instanceId=~s/\W+/_/g;
+	#$cmdline="perl $CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS $cmdline";
+	my $config = openOrCreateConfigFile();
+	my %instances = $config->addToHash('instances',$instanceId,$cmdline);
+	# Envoi du premier résultat (TODO : change to send instanceId)
+	processInstance($instanceId,$cmdline);
+	makeServerEventLoop();
 }
 
