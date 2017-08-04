@@ -224,10 +224,9 @@ sub processServerCommand {
 		$centrifugoClientHandle->disconnect() if $centrifugoClientHandle;
 	}
 	else {
-		my $cmdline = $command->{args}->{cmdline};
-		
 		# List of known commands :   RUN
 		if ('RUN' eq $cmd) {
+			my $cmdline = $command->{args}->{cmdline};
 			if ($cmdline =~ s/^CHECK\b *//i) {
 				processCheckCommand($cmdId, $cmdline);
 			} else {
@@ -235,13 +234,20 @@ sub processServerCommand {
 			}
 		}
 		elsif ('REGISTER' eq $cmd) {
+			my $cmdline = $command->{args}->{cmdline};
 			registerCheckCommand($cmdId, $cmdline);
 		}
+		elsif ('UNREGISTER' eq $cmd) {
+			my $serviceId = $command->{args}->{serviceId};
+			unregisterCheckCommand($cmdId, $serviceId);
+		}
 		elsif ('HELP' eq $cmd) {
+			my $cmdline = $command->{args}->{cmdline};
 			processHelpOnCheckCommand($cmdId, $cmdline);
 		}
 		else {
-			print "### ERROR : Unknown command : $cmd : $cmdline";
+			print "### ERROR : Unknown command : $cmd : ". 
+				join';',map {"'$_'=>'".$command->{args}->{$_}."'"} keys %{$command->{args}};
 		}
 	}
 }
@@ -324,15 +330,15 @@ sub processRunCommand {
 sub processCheckCommand {
 	my ($cmdId, $cmdline)=@_;
 	print "CHECK[$cmdId]:$cmdline";
-	$cmdline="perl $CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS $cmdline";
-	sendResultFromCommandLine($cmdId, $cmdline, executeCommand($cmdline) );
+	my $fullCmdline="perl $CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS $cmdline";
+	sendResultFromCommandLine($cmdId, $cmdline, executeCommand($fullCmdline) );
 }
 
 sub processInstance {
 	my ($iId, $cmdline)=@_;
 	print "INSTANCE[$iId]:$cmdline";
-	$cmdline="perl $CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS $cmdline";
-	sendServiceFromCommandLine($iId, $cmdline, executeCommand($cmdline) );
+	my $fullCmdline="perl $CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS $cmdline";
+	sendServiceFromCommandLine($iId, $cmdline, executeCommand($fullCmdline) );
 }
 
 sub processHelpOnCheckCommand {
@@ -342,19 +348,26 @@ sub processHelpOnCheckCommand {
 		return;
 	}
 	print "HELP[$cmdId]:$cmdline";
-	$cmdline="perl $CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS --help $cmdline";
-	sendResultFromCommandLine($cmdId, $cmdline, executeCommand($cmdline) );
+	my $fullCmdline="perl $CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS --help $cmdline";
+	sendResultFromCommandLine($cmdId, $cmdline, executeCommand($fullCmdline) );
 }
 
 sub registerCheckCommand {
 	my ($cmdId, $cmdline)=@_;
 	print "REGISTER[$cmdId]:$cmdline";
 	my $instanceId = $cmdline; $instanceId=~s/\W+/_/g;
-	#$cmdline="perl $CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS $cmdline";
 	my $config = openOrCreateConfigFile();
 	my %instances = $config->addToHash('instances',$instanceId,$cmdline);
 	# Envoi du premier résultat (TODO : change to send instanceId)
 	processInstance($instanceId,$cmdline);
+	makeServerEventLoop();
+}
+
+sub unregisterCheckCommand {
+	my ($cmdId, $instanceId)=@_;
+	print "UNREGISTER[$cmdId]:$instanceId";
+	my $config = openOrCreateConfigFile();
+	$config->deleteFromHash('instances',$instanceId);
 	makeServerEventLoop();
 }
 
