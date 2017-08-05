@@ -17,13 +17,24 @@ use REST::Client;
 
 use Centrifugo::Client;
 
-my $ALIVE_INTERVAL=10;
-our $CONFIG_FILE="/tmp/config.json";
+my $ALIVE_INTERVAL=180;
+our $CONFIG_FILE=$ARGV[0] || ( $^O=~/Win/i ? "C:/Windows/Temp/config.json" : "/tmp/config.json" );
+
 our $SERVER_BASE_API=$ENV{"DMON_API"};
 our $CENTRIFUGO_WS=$ENV{"CENT_WS"};
 
-my $CENTREON_PLUGINS_DIR='/var/lib/centreon-plugins';
+die "DMON_API environment variable must be set" unless $SERVER_BASE_API;
+die "CENT_WS environment variable must be set" unless $CENTRIFUGO_WS;
+
+
+my $CENTREON_PLUGINS_DIR=$ENV{"CENTREON_PLUGIN_ROOT"} || '/var/lib/centreon-plugins';
 my $CENTREON_PLUGINS='centreon_plugins.pl';
+
+my @ALT_CENTREON_ROOT = ( "../../centreon-plugins/", "../centreon-plugins/", "./centreon-plugins/");
+
+while (@ALT_CENTREON_ROOT && !-f "$CENTREON_PLUGINS_DIR/$CENTREON_PLUGINS") {
+	$CENTREON_PLUGINS_DIR = shift @ALT_CENTREON_ROOT;
+}
 
 my $API_KEY = "key-123";
 

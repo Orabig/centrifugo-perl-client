@@ -108,12 +108,15 @@ sub connect {
 				$sub->( $body->{body} );
 			}
 		});
-		
-		$this->{WSHANDLE}->on(parse_error => sub {
-			my($loop, $error) = @_;
-			warn "ERROR in Centrifugo::Client : $error";
-		});
-		
+
+		unless ($^O=~/Win/i) {
+			# This event seems to be unrecognized on Windows (?)
+			$this->{WSHANDLE}->on(parse_error => sub {
+				my($loop, $error) = @_;
+				warn "ERROR in Centrifugo::Client : $error";
+			});
+		}
+
 		# handle a closed connection...
 		$this->{WSHANDLE}->on(finish => sub {
 			my($loop) = @_;
