@@ -1,5 +1,7 @@
 package Centrifugo::Client;
 
+our $VERSION = "1.00";
+
 use Exporter;
 our @ISA = qw(Exporter);
 our @EXPORT = qw();
