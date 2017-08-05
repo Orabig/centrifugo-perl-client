@@ -1,0 +1,12 @@
+.
+./Makefile.PL
+./Changes
+./lib
+./lib/Centrifugo
+./lib/Centrifugo/Client.pm
+./README
+./Makefile.old
+./LICENSE
+./t
+./t/01_connect.t
+./MANIFEST
