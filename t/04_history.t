@@ -8,7 +8,7 @@ my $CENTRIFUGO_DEMO = 'centrifugo.herokuapp.com';
 my $CHANNEL = 'Perl-Module-Test'; #  $CHANNEL = 'public';
 my $DEBUG = 0;
 
-use Test::More tests => 3; # Connect, subscribe, send/receive random message
+use Test::More tests => 4; # Connect, subscribe, send 2 random messages, check history
 
 use Centrifugo::Client;
 
@@ -29,8 +29,9 @@ SKIP: {
 	my $USER      = 'perl-module-test';
 	my $TIMESTAMP = time();
 	my $SECRET = "secret";
-	
+
 	my $message = "Secret message : ".getRandomId();
+	my $message2 = "Secret message : ".getRandomId();
 	
 	my $TOKEN = hmac_sha256_hex( $USER, $TIMESTAMP, $SECRET );
 	
@@ -41,6 +42,8 @@ SKIP: {
 		ok 1, "Connected to $CHANNEL";
 		# Sends a message on Channel Perl-Module-Test
 		my $uid=$cclient-> subscribe( channel=>$CHANNEL );
+		
+		# $condvar->send;
 	})-> on('subscribe', sub{
 		my ($infoRef)=@_;
 		ok 1, "Subscribed to $CHANNEL";
@@ -48,12 +51,21 @@ SKIP: {
 		# Sends a message on Channel Perl-Module-Test
 		diag "Send message : $message";
 		$cclient-> publish( channel=>$CHANNEL, data => { message=>$message } );
-	})-> on('message', sub{
+		diag "Send message : $message2";
+		$cclient-> publish( channel=>$CHANNEL, data => { message=>$message2 } );
+		
+		$cclient-> history( channel=>$CHANNEL );
+		
+		# $condvar->send;
+	})-> on('history', sub{
 		my ($infoRef)=@_;
 
-		my $rcv = $infoRef->{data}->{message};
-		if ($rcv eq $message ) {
-			ok(1, "Message received");
+		my $history = $infoRef->{data};
+		foreach my $data (@$history) {
+			my $msg = $data->{data}->{message};
+			foreach my $ref ($message,$message2) {
+				ok('true', "Message $ref found in 'history' result") if $ref eq $msg;
+			}
 		}
 		$condvar->send;
 	})-> on('disconnect', sub{

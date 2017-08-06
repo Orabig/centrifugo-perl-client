@@ -8,7 +8,7 @@ my $CENTRIFUGO_DEMO = 'centrifugo.herokuapp.com';
 my $CHANNEL = 'Perl-Module-Test'; #  $CHANNEL = 'public';
 my $DEBUG = 0;
 
-use Test::More tests => 3; # Connect, subscribe, send/receive random message
+use Test::More tests => 3; # Connect, ping/pong
 
 use Centrifugo::Client;
 
@@ -30,31 +30,21 @@ SKIP: {
 	my $TIMESTAMP = time();
 	my $SECRET = "secret";
 	
-	my $message = "Secret message : ".getRandomId();
-	
 	my $TOKEN = hmac_sha256_hex( $USER, $TIMESTAMP, $SECRET );
 	
 	my $cclient = Centrifugo::Client->new("ws://$CENTRIFUGO_DEMO/connection/websocket", debug => $DEBUG );
+	
+	my $uid = getRandomId();
 
 	$cclient-> on('connect', sub{
 		my ($infoRef)=@_;
 		ok 1, "Connected to $CHANNEL";
-		# Sends a message on Channel Perl-Module-Test
-		my $uid=$cclient-> subscribe( channel=>$CHANNEL );
-	})-> on('subscribe', sub{
+		diag "Send ping : (uid=$uid)";
+		$uid=$cclient-> ping( uid=>$uid );
+	})-> on('ping', sub{
 		my ($infoRef)=@_;
-		ok 1, "Subscribed to $CHANNEL";
-		
-		# Sends a message on Channel Perl-Module-Test
-		diag "Send message : $message";
-		$cclient-> publish( channel=>$CHANNEL, data => { message=>$message } );
-	})-> on('message', sub{
-		my ($infoRef)=@_;
-
-		my $rcv = $infoRef->{data}->{message};
-		if ($rcv eq $message ) {
-			ok(1, "Message received");
-		}
+		ok 1, "Ping received";
+		ok $infoRef->{uid} eq $uid, "Same ping UID returned";
 		$condvar->send;
 	})-> on('disconnect', sub{
 		my ($infoRef)=@_;

@@ -8,9 +8,10 @@ my $CENTRIFUGO_DEMO = 'centrifugo.herokuapp.com';
 my $CHANNEL = 'Perl-Module-Test'; #  $CHANNEL = 'public';
 my $DEBUG = 0;
 
-use Test::More tests => 3; # Connect, subscribe, send/receive random message
+use Test::More tests => 3; # Connect, subscribe, check presence
 
 use Centrifugo::Client;
+
 
 sub getRandomId() {
 	my $id = hmac_sha256_hex(rand());
@@ -26,7 +27,7 @@ SKIP: {
 
 	# This part is aiming to get a valid TOKEN for Centrifugo_demo site.
 	# On real application, this step should ALWAYS be done on server side
-	my $USER      = 'perl-module-test';
+	my $USER      = 'User-'.getRandomId();
 	my $TIMESTAMP = time();
 	my $SECRET = "secret";
 	
@@ -38,24 +39,26 @@ SKIP: {
 
 	$cclient-> on('connect', sub{
 		my ($infoRef)=@_;
-		ok 1, "Connected to $CHANNEL";
+		ok 1, "Connected to $CHANNEL as $USER";
 		# Sends a message on Channel Perl-Module-Test
 		my $uid=$cclient-> subscribe( channel=>$CHANNEL );
+		
+		# $condvar->send;
 	})-> on('subscribe', sub{
 		my ($infoRef)=@_;
 		ok 1, "Subscribed to $CHANNEL";
 		
-		# Sends a message on Channel Perl-Module-Test
-		diag "Send message : $message";
-		$cclient-> publish( channel=>$CHANNEL, data => { message=>$message } );
-	})-> on('message', sub{
+		# Check presence
+		$cclient-> presence( channel=>$CHANNEL );
+		
+		# $condvar->send;
+	})-> on('presence', sub{
 		my ($infoRef)=@_;
 
-		my $rcv = $infoRef->{data}->{message};
-		if ($rcv eq $message ) {
-			ok(1, "Message received");
-		}
+		ok(encode_json($infoRef->{data})=~/"user":"$USER"/, "User $USER found in 'presence' result");
+		
 		$condvar->send;
+		
 	})-> on('disconnect', sub{
 		my ($infoRef)=@_;
 		diag "Received : Disconnected : ".$infoRef;

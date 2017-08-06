@@ -1,6 +1,6 @@
 package Centrifugo::Client;
 
-our $VERSION = "1.01";
+our $VERSION = "1.03";
 
 use Exporter;
 our @ISA = qw(Exporter);
@@ -77,7 +77,7 @@ sub new {
 	return $this;
 }
 
-=head1 FUNCTION connect
+=head1 FUNCTION connect - send authorization parameters to Centrifugo so your connection could start subscribing on channels.
 
 $client->connect(
 		user => $USER_ID,
@@ -178,7 +178,7 @@ sub connect {
 	$this;
 }
 
-=head1 FUNCTION publish
+=head1 FUNCTION publish - allows clients directly publish messages into channel (use with caution. Client->Server communication is NOT the aim of Centrifugo)
 
     $client->publish( channel=>$channel, data=>$data, [uid => $uid] );
 
@@ -226,7 +226,7 @@ sub disconnect {
 	$sub->() if $sub;
 }
 
-=head1 FUNCTION subscribe
+=head1 FUNCTION subscribe - allows to subscribe on channel after client successfully connected.
 
 $client->subscribe( channel => $channel, [ uid => $uid ] );
 
@@ -236,16 +236,80 @@ This function returns the UID used to send the command to the server. (a random 
 
 sub subscribe {
 	my ($this, %PARAMS) = @_;
+	return _channel_command($this,'subscribe',%PARAMS);
+}
+
+sub _channel_command {
+	my ($this,$command,%PARAMS) = @_;
 	my $channel = $PARAMS{'channel'};
-	croak("Missing channel in Centrifugo::Client->subscribe(...)") unless $channel;
+	croak("Missing channel in Centrifugo::Client->$command(...)") unless $channel;
 	my $uid = $PARAMS{'uid'} || _generate_random_id();
-	my $SUBSCRIBE = encode_json {
+	my $MSG = encode_json {
 		UID => $uid ,
-		method => 'subscribe',
+		method => $command,
 		params => { channel => $channel }
 	};
-	print STDERR "Centrifugo::Client : WS > $SUBSCRIBE\n" if $this->{DEBUG};
-	$this->{WSHANDLE}->send($SUBSCRIBE);
+	print STDERR "Centrifugo::Client : WS > $MSG\n" if $this->{DEBUG};
+	$this->{WSHANDLE}->send($MSG);
+	return $uid;
+}
+
+=head1 FUNCTION unsubscribe - allows to unsubscribe from channel.
+
+$client->unsubscribe( channel => $channel, [ uid => $uid ] );
+
+This function returns the UID used to send the command to the server. (a random string if none is provided)
+
+=cut
+
+sub unsubscribe {
+	my ($this, %PARAMS) = @_;
+	return _channel_command($this,'unsubscribe',%PARAMS);
+}
+
+=head1 FUNCTION presence – allows to ask server for channel presence information.
+
+$client->presence( channel => $channel, [ uid => $uid ] );
+
+This function returns the UID used to send the command to the server. (a random string if none is provided)
+
+=cut
+
+sub presence {
+	my ($this, %PARAMS) = @_;
+	return _channel_command($this,'presence',%PARAMS);
+}
+
+=head1 FUNCTION history – allows to ask server for channel presence information.
+
+$client->history( channel => $channel, [ uid => $uid ] );
+
+This function returns the UID used to send the command to the server. (a random string if none is provided)
+
+=cut
+
+sub history {
+	my ($this, %PARAMS) = @_;
+	return _channel_command($this,'history',%PARAMS);
+}
+
+=head1 FUNCTION ping – allows to send ping command to server, server will answer this command with ping response.
+
+$client->ping( [ uid => $uid ] );
+
+This function returns the UID used to send the command to the server. (a random string if none is provided)
+
+=cut
+
+sub ping {
+	my ($this,%PARAMS) = @_;
+	my $uid = $PARAMS{'uid'} || _generate_random_id();
+	my $MSG = encode_json {
+		UID => $uid ,
+		method => 'ping'
+	};
+	print STDERR "Centrifugo::Client : WS > $MSG\n" if $this->{DEBUG};
+	$this->{WSHANDLE}->send($MSG);
 	return $uid;
 }
 
