@@ -45,7 +45,7 @@ Note : To connect to a Centrifugo instance, your program should first ask for a 
 		my ($infoRef)=@_;
 		print "Connected to Centrifugo version ".$infoRef->{version};
 		# When connected, connect to some channel
-		$cclient->subscribe( $CHANNEL );
+		$cclient->subscribe( channel=>$CHANNEL );
 	})-> on('message', sub{
 		my ($infoRef)=@_;
 		print "Received message : ".encode_json $infoRef->{data};
