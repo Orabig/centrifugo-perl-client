@@ -17,6 +17,10 @@ To install this module, run the following commands:
 	make
 	make install
 	
+or simply use cpanminus:
+
+	cpanm Centrifugo::Client
+	
 SUPPORT AND DOCUMENTATION
 
 After installing, you can find documentation for this module with the

@@ -1,6 +1,6 @@
 package Centrifugo::Client;
 
-our $VERSION = "1.00";
+our $VERSION = "1.01";
 
 use Exporter;
 our @ISA = qw(Exporter);
@@ -21,22 +21,22 @@ Centrifugo::Client
 
  my $cclient = Centrifugo::Client->new("$CENTRIFUGO_WS/connection/websocket");
 
- $cclient->connect(
-		user => $USER_ID,
-		timestamp => $TIMESTAMP,
-		token => $TOKEN
-	) -> on('connect', sub{
+ $cclient -> on('connect', sub{
 		my ($infoRef)=@_;
 		print "Connected to Centrifugo version ".$infoRef->{version};
 		
 		# When connected, client_id() is defined, so we can subscribe to our private channel
 		$cclient->subscribe( '&'.$cclient->client_id() );
 		
-	})-> on('message', sub{
+	}) -> on('message', sub{
 		my ($infoRef)=@_;
 		print "MESSAGE: ".encode_json $infoRef->{data};
 
-	});
+	}) -> connect(
+		user => $USER_ID,
+		timestamp => $TIMESTAMP,
+		token => $TOKEN
+	);
 
  # Now start the event loop to keep the program alive
  AnyEvent->condvar->recv;
@@ -50,6 +50,22 @@ This library allows to communicate with Centrifugo through a websocket.
 use strict;
 use warnings;
 
+
+=head1 FUNCTION new
+
+	my $client = Centrifugo::Client->new( $URL );
+
+or
+
+	my $client = Centrifugo::Client->new( $URL,
+	   debug => 'true',           # if true, some informations are written on STDERR
+	   ws_params => {             # These parameters are passed to AnyEvent::WebSocket::Client->new(...)
+			 ssl_no_verify => 'true',
+			 timeout => 600
+		  },
+	   );
+
+=cut
 
 sub new {
 	my ($class, $ws_url, %params)=@_;
@@ -72,42 +88,49 @@ $client->connect(
 
 sub connect {
 	my ($this,%PARAMS) = @_;
-	croak("Undefined user") if ! $PARAMS{user};
-	croak("Undefined timestamp") if ! $PARAMS{timestamp};
-	croak("Undefined token") if ! $PARAMS{token};
+	croak("Undefined user in Centrifugo::Client->connect(...)") if ! $PARAMS{user};
+	croak("Undefined timestamp in Centrifugo::Client->connect(...)") if ! $PARAMS{timestamp};
+	croak("Undefined token in Centrifugo::Client->connect(...)") if ! $PARAMS{token};
 	$this->{WEBSOCKET}->connect( $this->{WS_URL} )->cb(sub {
 		# Connects to Websocket
 		$this->{WSHANDLE} = eval { shift->recv };
 		if($@) {
 			# handle error...
-			warn $@;
+			warn "Error in Centrifugo::Client : $@";
+			$this->{ON}->{'error'}->($@) if $this->{ON}->{'error'};
 			return;
 		}
 		
-		$PARAMS{timestamp}="$PARAMS{timestamp}"; # This MUST be a string		
+		# Fix parameters sent to Centrifugo
+		$PARAMS{timestamp}="$PARAMS{timestamp}" if $PARAMS{timestamp}; # This MUST be a string
+		
 		# Sends a CONNECT message to Centrifugo
 		my $CONNECT=encode_json {
-			UID => 'someId',
 			method => 'connect',
 			params => \%PARAMS
 		};
+		
 		print STDERR "Centrifugo::Client : WS > $CONNECT\n" if $this->{DEBUG};
-		$this->{WSHANDLE}->send($CONNECT);
-		#DEBUG
-		our $wsh=$this->{WSHANDLE};
 		$this->{WSHANDLE}->on(each_message => sub {
 			my($loop, $message) = @_;
 			print STDERR "Centrifugo::Client : WS < $message->{body}\n" if $this->{DEBUG};
 			my $body = decode_json($message->{body});
-			my $method = $body->{method};
-			if ($method eq 'connect') {
-				# on Connect, the client_id must be read
-				$this->{CLIENT_ID} = $body->{body}->{client};
-				print STDERR "Centrifugo::Client : CLIENT_ID=$this->{CLIENT_ID}\n" if $this->{DEBUG};
+			if (ref($body) eq 'HASH') {
+				$body = [ $body ];
 			}
-			my $sub = $this->{ON}->{$method};
-			if ($sub) {
-				$sub->( $body->{body} );
+			foreach my $info (@$body) {
+				my $method = $info->{method};
+				if ($method eq 'connect') {
+					# on Connect, the client_id must be read
+					if ($info->{body} && ref($body) eq 'HASH' && $info->{body}->{client}) {
+						$this->{CLIENT_ID} = $info->{body}->{client};
+						print STDERR "Centrifugo::Client : CLIENT_ID=$this->{CLIENT_ID}\n" if $this->{DEBUG};
+					}
+				}
+				my $sub = $this->{ON}->{$method};
+				if ($sub) {
+					$sub->( $info->{body} );
+				}
 			}
 		});
 
@@ -115,7 +138,8 @@ sub connect {
 			# This event seems to be unrecognized on Windows (?)
 			$this->{WSHANDLE}->on(parse_error => sub {
 				my($loop, $error) = @_;
-				warn "ERROR in Centrifugo::Client : $error";
+				warn "Error in Centrifugo::Client : $error";
+				$this->{ON}->{'error'}->($error) if $this->{ON}->{'error'};
 			});
 		}
 
@@ -123,11 +147,46 @@ sub connect {
 		$this->{WSHANDLE}->on(finish => sub {
 			my($loop) = @_;
 			print STDERR "Centrifugo::Client : Connection closed\n" if $this->{DEBUG};
+			$this->{ON}->{'ws_closed'}->() if $this->{ON}->{'ws_closed'};
 			undef $this->{WSHANDLE};
 			undef $this->{CLIENT_ID};
 		});
+
+		$this->{WSHANDLE}->send($CONNECT);
+
 	});
 	$this;
+}
+
+=head1 FUNCTION publish
+
+    $client->publish( $channel, $data );
+
+$data must be a HASHREF to a structure (which will be encoded to JSON), for example :
+
+    $client->public ( "public", {
+	    nick => "Anonymous",
+	    text => "My message",
+	    } );
+
+or even :
+
+    $client->public ( "public", { } ); # Sends an empty message to the "public" channel
+
+=cut
+
+sub publish {
+	my ($this, $channel, $data) = @_;
+	my $PUBLISH = encode_json {
+		UID => 'anyId',
+		method => 'publish',
+		params => {
+			channel => $channel,
+			data => $data
+		}
+	};
+	print STDERR "Centrifugo::Client : WS > $PUBLISH\n" if $this->{DEBUG};
+	$this->{WSHANDLE}->send( $PUBLISH );
 }
 
 =head1 FUNCTION disconnect
@@ -168,7 +227,7 @@ $client->on( 'connect', sub {
 });
 
 Known events are 'message', 'connect', 'disconnect', 'subscribe', 'unsubscribe', 'publish', 'presence', 'history', 'join', 'leave',
-'refresh', 'ping'
+'refresh', 'ping', 'ws_closed', 'ws_error'
 
 =cut
 
@@ -180,7 +239,7 @@ sub on {
 
 =head1 FUNCTION client_id
 
-$client->client_id() return the client_id if it is connected to Centrifugo, or undef.
+$client->client_id() return the client_id if it is connected to Centrifugo and the server returned this ID (which is not the case on the demo server).
 
 =cut
 
