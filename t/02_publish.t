@@ -36,7 +36,7 @@ SKIP: {
 		my ($infoRef)=@_;
 		ok 1, "Connected to $CHANNEL";
 		# Sends a message on Channel Perl-Module-Test
-		$cclient-> subscribe( $CHANNEL );
+		my $uid=$cclient-> subscribe( channel=>$CHANNEL );
 		
 		# $condvar->send;
 	})-> on('subscribe', sub{
@@ -45,7 +45,7 @@ SKIP: {
 		
 		# Sends a message on Channel Perl-Module-Test
 		diag "Send message : $message";
-		$cclient-> publish( $CHANNEL, { message=>$message } );
+		$cclient-> publish( channel=>$CHANNEL, data => { message=>$message } );
 		
 		# $condvar->send;
 	})-> on('message', sub{
@@ -69,7 +69,7 @@ SKIP: {
 	})->connect(
 		user => $USER,
 		timestamp => $TIMESTAMP,
-		token => $TOKEN
+		token => $TOKEN, uid=>"ABBBCCCDDDEEEFFFGGG"
 	);
 	
 	$condvar->recv;

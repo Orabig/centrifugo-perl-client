@@ -82,15 +82,22 @@ sub new {
 $client->connect(
 		user => $USER_ID,
 		timestamp => $TIMESTAMP,
-		token => $TOKEN );
+		token => $TOKEN,
+		[info => $info,]
+		[uid => $uid,]
+		);
+
+(this function retuns $self to allow chains of multiple function calls)
+		
+It is possible to provide a UID for this command, but if you don't, a random one will be generated for you, but cannot be retrieved afterward.
 
 =cut
 
 sub connect {
 	my ($this,%PARAMS) = @_;
-	croak("Undefined user in Centrifugo::Client->connect(...)") if ! $PARAMS{user};
-	croak("Undefined timestamp in Centrifugo::Client->connect(...)") if ! $PARAMS{timestamp};
-	croak("Undefined token in Centrifugo::Client->connect(...)") if ! $PARAMS{token};
+	croak("Missing user in Centrifugo::Client->connect(...)") if ! $PARAMS{user};
+	croak("Missing timestamp in Centrifugo::Client->connect(...)") if ! $PARAMS{timestamp};
+	croak("Missing token in Centrifugo::Client->connect(...)") if ! $PARAMS{token};
 	$this->{WEBSOCKET}->connect( $this->{WS_URL} )->cb(sub {
 		# Connects to Websocket
 		$this->{WSHANDLE} = eval { shift->recv };
@@ -104,8 +111,11 @@ sub connect {
 		# Fix parameters sent to Centrifugo
 		$PARAMS{timestamp}="$PARAMS{timestamp}" if $PARAMS{timestamp}; # This MUST be a string
 		
+		my $uid=$PARAMS{uid} || _generate_random_id();
+		delete $PARAMS{uid};
 		# Sends a CONNECT message to Centrifugo
 		my $CONNECT=encode_json {
+			UID => $uid,
 			method => 'connect',
 			params => \%PARAMS
 		};
@@ -115,21 +125,31 @@ sub connect {
 			my($loop, $message) = @_;
 			print STDERR "Centrifugo::Client : WS < $message->{body}\n" if $this->{DEBUG};
 			my $body = decode_json($message->{body});
+			# Handle a body containing {response}
 			if (ref($body) eq 'HASH') {
 				$body = [ $body ];
 			}
+			# Handle a body containing [{response},{response}...]
 			foreach my $info (@$body) {
+				my $uid = $info->{uid};
 				my $method = $info->{method};
+				my $error = $info->{error};
+				my $body = $info->{body}; # Not the same 'body' as above
 				if ($method eq 'connect') {
-					# on Connect, the client_id must be read
-					if ($info->{body} && ref($body) eq 'HASH' && $info->{body}->{client}) {
-						$this->{CLIENT_ID} = $info->{body}->{client};
-						print STDERR "Centrifugo::Client : CLIENT_ID=$this->{CLIENT_ID}\n" if $this->{DEBUG};
+					# on Connect, the client_id must be read (if available)
+					if ($body && ref($body) eq 'HASH' && $body->{client}) {
+						$this->{CLIENT_ID} = $body->{client};
+						print STDERR "Centrifugo::Client : CLIENT_ID=".$this->{CLIENT_ID}."\n" if $this->{DEBUG};
 					}
 				}
+				# Call the callback of the method
 				my $sub = $this->{ON}->{$method};
 				if ($sub) {
-					$sub->( $info->{body} );
+					# Add UID into body if available
+					if ($uid) {
+						$body->{uid}=$uid;
+					}
+					$sub->( $body );
 				}
 			}
 		});
@@ -160,33 +180,37 @@ sub connect {
 
 =head1 FUNCTION publish
 
-    $client->publish( $channel, $data );
+    $client->publish( channel=>$channel, data=>$data, [uid => $uid] );
 
 $data must be a HASHREF to a structure (which will be encoded to JSON), for example :
 
-    $client->public ( "public", {
-	    nick => "Anonymous",
-	    text => "My message",
+    $client->public ( channel => "public", 
+		data => {
+			nick => "Anonymous",
+			text => "My message",
 	    } );
 
 or even :
 
-    $client->public ( "public", { } ); # Sends an empty message to the "public" channel
+    $client->public ( channel => "public", data => { } ); # Sends an empty message to the "public" channel
 
+This function returns the UID used to send the command to the server. (a random string if none is provided)
 =cut
 
 sub publish {
-	my ($this, $channel, $data) = @_;
+	my ($this, %PARAMS) = @_;
+	croak("Missing channel in Centrifugo::Client->publish(...)") unless $PARAMS{channel};
+	croak("Missing data in Centrifugo::Client->publish(...)") unless $PARAMS{data};
+	my $uid = $PARAMS{'uid'} || _generate_random_id();
+	delete $PARAMS{'uid'};
 	my $PUBLISH = encode_json {
-		UID => 'anyId',
+		UID => $uid,
 		method => 'publish',
-		params => {
-			channel => $channel,
-			data => $data
-		}
+		params => \%PARAMS
 	};
 	print STDERR "Centrifugo::Client : WS > $PUBLISH\n" if $this->{DEBUG};
 	$this->{WSHANDLE}->send( $PUBLISH );
+	return $uid;
 }
 
 =head1 FUNCTION disconnect
@@ -204,30 +228,42 @@ sub disconnect {
 
 =head1 FUNCTION subscribe
 
-$client->subscribe( $channel );
+$client->subscribe( channel => $channel, [ uid => $uid ] );
+
+This function returns the UID used to send the command to the server. (a random string if none is provided)
 
 =cut
 
 sub subscribe {
-	my ($this, $channel) = @_;
+	my ($this, %PARAMS) = @_;
+	my $channel = $PARAMS{'channel'};
+	croak("Missing channel in Centrifugo::Client->subscribe(...)") unless $channel;
+	my $uid = $PARAMS{'uid'} || _generate_random_id();
 	my $SUBSCRIBE = encode_json {
-		UID => 'anyId',
+		UID => $uid ,
 		method => 'subscribe',
 		params => { channel => $channel }
 	};
 	print STDERR "Centrifugo::Client : WS > $SUBSCRIBE\n" if $this->{DEBUG};
 	$this->{WSHANDLE}->send($SUBSCRIBE);
+	return $uid;
 }
 
 =head1 FUNCTION on
 
-$client->on( 'connect', sub { 
-   my(%data) = @_;
-   ...
-});
+Register a callback for the given event.
 
 Known events are 'message', 'connect', 'disconnect', 'subscribe', 'unsubscribe', 'publish', 'presence', 'history', 'join', 'leave',
 'refresh', 'ping', 'ws_closed', 'ws_error'
+
+$client->on( 'connect', sub { 
+   my( $dataRef ) = @_;
+   ...
+});
+
+(this function retuns $self to allow chains of multiple function calls)
+
+Note : Events that are an answer to the client requests (ie 'connect', 'publish', ...) have an 'uid' which is added into the %data structure.
 
 =cut
 
@@ -245,7 +281,16 @@ $client->client_id() return the client_id if it is connected to Centrifugo and t
 
 sub client_id {
 	my ($this)=@_;
-	$this->{CLIENT_ID};
+	return $this->{CLIENT_ID};
+}
+
+
+##### (kinda)-private functions
+
+# Generates a random Id for commands
+sub _generate_random_id {
+	my @c = ('a'..'z','A'..'Z',0..9);
+	return join '', @c[ map{ rand @c } 1 .. 12 ];
 }
 
 1;

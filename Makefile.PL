@@ -14,9 +14,7 @@ WriteMakefile(
     CONFIGURE_REQUIRES => { 'ExtUtils::MakeMaker' => 0, },
     BUILD_REQUIRES     => { 
 		'Test::More' => 0,
-		'LWP::UserAgent' => 0,
-		'LWP::Protocol::https' => 0,
-		'HTTP::Request::Common' => 0,
+		'Digest::SHA' => 0,
 		},
     PREREQ_PM          => {
         'AnyEvent::WebSocket::Client'           => 0.12,
