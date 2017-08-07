@@ -7,7 +7,7 @@ our @ISA = qw(Exporter);
 our @EXPORT = qw();
 
 use Carp qw( croak );
-use AnyEvent::WebSocket::Client 0.12;
+use AnyEvent::WebSocket::Client 0.40; # Version needed for reason when close. See https://github.com/plicease/AnyEvent-WebSocket-Client/issues/30
 use JSON;
 
 =head1 NAME
@@ -157,7 +157,7 @@ sub connect {
 		unless ($^O=~/Win/i) {
 			# This event seems to be unrecognized on Windows (?)
 			$this->{WSHANDLE}->on(parse_error => sub {
-				my($loop, $error) = @_;
+				my($cnx, $error) = @_;
 				warn "Error in Centrifugo::Client : $error";
 				$this->{ON}->{'error'}->($error) if $this->{ON}->{'error'};
 			});
@@ -165,9 +165,14 @@ sub connect {
 
 		# handle a closed connection...
 		$this->{WSHANDLE}->on(finish => sub {
-			my($loop) = @_;
-			print STDERR "Centrifugo::Client : Connection closed\n" if $this->{DEBUG};
-			$this->{ON}->{'ws_closed'}->() if $this->{ON}->{'ws_closed'};
+			my($cnx) = @_;
+			my $reason = $cnx->close_reason();
+			do {
+				$reason = (decode_json $reason)->{reason};
+			};
+			
+			print STDERR "Centrifugo::Client : Connection closed (reason=$reason)\n" if $this->{DEBUG};
+			$this->{ON}->{'ws_closed'}->($reason) if $this->{ON}->{'ws_closed'};
 			undef $this->{WSHANDLE};
 			undef $this->{CLIENT_ID};
 		});

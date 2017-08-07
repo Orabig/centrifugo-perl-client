@@ -39,7 +39,8 @@ SKIP: {
 		my ($error)=@_;
 		$condvar->send;
 	})-> on('ws_closed', sub{
-		diag "Received : Websocket connection closed";
+		my ($reason)=@_;
+		diag "Received : Websocket connection closed : $reason";
 		$condvar->send;
 	})->connect(
 		user => $USER,
