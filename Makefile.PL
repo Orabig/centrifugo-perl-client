@@ -10,7 +10,7 @@ WriteMakefile(
     ABSTRACT_FROM      => 'lib/Centrifugo/Client.pm',
     LICENSE            => 'MIT',
     PL_FILES           => {},
-    MIN_PERL_VERSION   => 5.006,
+    MIN_PERL_VERSION   => 5.10.0,
     CONFIGURE_REQUIRES => { 'ExtUtils::MakeMaker' => 0, },
     BUILD_REQUIRES     => { 
 		'Test::More' => 0,
