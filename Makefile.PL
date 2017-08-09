@@ -17,7 +17,7 @@ WriteMakefile(
 		'Digest::SHA' => 0,
 		},
     PREREQ_PM          => {
-        'AnyEvent::WebSocket::Client'           => 0.12,
+        'AnyEvent::WebSocket::Client'           => 0.37,
         'JSON'     => 0,
 
     },

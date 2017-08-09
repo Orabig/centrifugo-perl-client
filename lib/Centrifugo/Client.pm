@@ -7,7 +7,7 @@ our @ISA = qw(Exporter);
 our @EXPORT = qw();
 
 use Carp qw( croak );
-use AnyEvent::WebSocket::Client 0.12;
+use AnyEvent::WebSocket::Client 0.37;
 use JSON;
 
 =head1 NAME
@@ -154,14 +154,11 @@ sub connect {
 			}
 		});
 
-		unless ($^O=~/Win/i) {
-			# This event seems to be unrecognized on Windows (?)
-			$this->{WSHANDLE}->on(parse_error => sub {
-				my($loop, $error) = @_;
-				warn "Error in Centrifugo::Client : $error";
-				$this->{ON}->{'error'}->($error) if $this->{ON}->{'error'};
-			});
-		}
+		$this->{WSHANDLE}->on(parse_error => sub {
+			my($loop, $error) = @_;
+			warn "Error in Centrifugo::Client : $error";
+			$this->{ON}->{'error'}->($error) if $this->{ON}->{'error'};
+		});
 
 		# handle a closed connection...
 		$this->{WSHANDLE}->on(finish => sub {
