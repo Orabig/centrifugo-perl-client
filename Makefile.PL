@@ -18,6 +18,7 @@ WriteMakefile(
 		},
     PREREQ_PM          => {
         'AnyEvent::WebSocket::Client'           => 0.12,
+        'AnyEvent::HTTP'           => 0,
         'JSON'     => 0,
 
     },

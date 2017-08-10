@@ -8,6 +8,7 @@ our @EXPORT = qw();
 
 use Carp qw( croak );
 use AnyEvent::WebSocket::Client 0.40; # Version needed for reason when close. See https://github.com/plicease/AnyEvent-WebSocket-Client/issues/30
+use AnyEvent::HTTP;
 use JSON;
 
 =head1 NAME
@@ -58,8 +59,9 @@ use warnings;
 or
 
 	my $client = Centrifugo::Client->new( $URL,
-	   debug => 'true',           # if true, some informations are written on STDERR
-	   ws_params => {             # These parameters are passed to AnyEvent::WebSocket::Client->new(...)
+	   debug => 'true',          # If true, some informations are written on STDERR
+	   authEndpoint => "...",    # The full URL used to ask for a key to subscribe to private channels
+	   ws_params => {            # These parameters are passed to AnyEvent::WebSocket::Client->new(...)
 			 ssl_no_verify => 'true',
 			 timeout => 600
 		  },
@@ -73,6 +75,7 @@ sub new {
 	bless($this, $class);
 	$this->{WS_URL} = $ws_url;
 	$this->{DEBUG} = $params{debug} && uc($params{debug})ne'FALSE';
+	$this->{AUTH_URL} = $params{authEndpoint} || "/centrifuge/auth/";
 	$this->{WEBSOCKET} = AnyEvent::WebSocket::Client -> new( %{$params{ws_params}} );
 	return $this;
 }
@@ -124,13 +127,13 @@ sub connect {
 		$this->{WSHANDLE}->on(each_message => sub {
 			my($loop, $message) = @_;
 			print STDERR "Centrifugo::Client : WS < $message->{body}\n" if $this->{DEBUG};
-			my $body = decode_json($message->{body});
+			my $fullbody = decode_json($message->{body});
 			# Handle a body containing {response}
-			if (ref($body) eq 'HASH') {
-				$body = [ $body ];
+			if (ref($fullbody) eq 'HASH') {
+				$fullbody = [ $fullbody ];
 			}
 			# Handle a body containing [{response},{response}...]
-			foreach my $info (@$body) {
+			foreach my $info (@$fullbody) {
 				my $uid = $info->{uid};
 				my $method = $info->{method};
 				my $error = $info->{error};
@@ -233,7 +236,9 @@ sub disconnect {
 
 =head1 FUNCTION subscribe - allows to subscribe on channel after client successfully connected.
 
-$client->subscribe( channel => $channel, [ uid => $uid ] );
+$client->subscribe( channel => $channel, [ client => $clientId  ,] [ uid => $uid ,] );
+
+If the channel is private (starts with a '$'), then a request to $this->{AUTH_URL} must be done to get the channel key. In that case, clientId is mandatory.
 
 This function returns the UID used to send the command to the server. (a random string if none is provided)
 
@@ -241,18 +246,41 @@ This function returns the UID used to send the command to the server. (a random 
 
 sub subscribe {
 	my ($this, %PARAMS) = @_;
-	return _channel_command($this,'subscribe',%PARAMS);
+	my $channel = $PARAMS{channel};
+	return _channel_command($this,'subscribe',%PARAMS) unless $channel=~/^\$/;
+	# If the channel is private, then an API-call to /centrifuge/auth/ must be done
+	croak "'clientId' parameter is mandatory to subscribe to private channels" unless $PARAMS{client};
+
+	# Request a channel key
+	my $data = encode_json {
+		client => $PARAMS{client},
+		channels => [ $channel ]
+	};
+	my $URL = $this->{AUTH_URL};
+	http_post $URL, $data, 
+		headers => {
+			contentType => "application/json"
+		},
+		sub {
+		  my ($data, $headers) = @_;
+		  warn "Couldn't connect to $URL : Status=".$headers->{Status} and return unless $headers->{Status}==200;
+		  my $result = decode_json $data;
+		  my $key = $result->{$channel}->{sign};
+		  $PARAMS{sign} = $key;
+		  # The request is now complete : {channel:"...", client:"...", sign:"..."}
+		  return _channel_command($this,'subscribe',%PARAMS);
+	   };
 }
 
 sub _channel_command {
 	my ($this,$command,%PARAMS) = @_;
-	my $channel = $PARAMS{'channel'};
-	croak("Missing channel in Centrifugo::Client->$command(...)") unless $channel;
+#	my $channel = $PARAMS{'channel'};
+#	croak("Missing channel in Centrifugo::Client->$command(...)") unless $PARAMS{'channel'};
 	my $uid = $PARAMS{'uid'} || _generate_random_id();
 	my $MSG = encode_json {
 		UID => $uid ,
 		method => $command,
-		params => { channel => $channel }
+		params => \%PARAMS
 	};
 	print STDERR "Centrifugo::Client : WS > $MSG\n" if $this->{DEBUG};
 	$this->{WSHANDLE}->send($MSG);
