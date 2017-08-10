@@ -61,6 +61,8 @@ or
 	my $client = Centrifugo::Client->new( $URL,
 	   debug => 'true',          # If true, some informations are written on STDERR
 	   authEndpoint => "...",    # The full URL used to ask for a key to subscribe to private channels
+	   max_alive_period => 30,   # If max_alive_period has passed since last communication with server, a PING is send (default 0)
+	   refresh_period => 5,      # Check frequency for max_alive_period (default 10s)
 	   ws_params => {            # These parameters are passed to AnyEvent::WebSocket::Client->new(...)
 			 ssl_no_verify => 'true',
 			 timeout => 600
@@ -77,6 +79,8 @@ sub new {
 	$this->{DEBUG} = $params{debug} && uc($params{debug})ne'FALSE';
 	$this->{AUTH_URL} = $params{authEndpoint} || "/centrifuge/auth/";
 	$this->{WEBSOCKET} = AnyEvent::WebSocket::Client -> new( %{$params{ws_params}} );
+	$this->{MAX_ALIVE} = $params{max_alive_period} || 0;
+	$this->{REFRESH} = $params{refresh_period} || 10;
 	return $this;
 }
 
@@ -123,10 +127,11 @@ sub connect {
 			params => \%PARAMS
 		};
 		
-		print STDERR "Centrifugo::Client : WS > $CONNECT\n" if $this->{DEBUG};
+		print STDERR "Centrifugo::Client : WebSocket > $CONNECT\n" if $this->{DEBUG};
 		$this->{WSHANDLE}->on(each_message => sub {
 			my($loop, $message) = @_;
-			print STDERR "Centrifugo::Client : WS < $message->{body}\n" if $this->{DEBUG};
+			print STDERR "Centrifugo::Client : R< WS : $message->{body}\n" if $this->{DEBUG};
+			$this->{last_alive_message} = time();
 			my $fullbody = decode_json($message->{body});
 			# Handle a body containing {response}
 			if (ref($fullbody) eq 'HASH') {
@@ -143,6 +148,20 @@ sub connect {
 					if ($body && ref($body) eq 'HASH' && $body->{client}) {
 						$this->{CLIENT_ID} = $body->{client};
 						print STDERR "Centrifugo::Client : CLIENT_ID=".$this->{CLIENT_ID}."\n" if $this->{DEBUG};
+					}
+					if ($this->{MAX_ALIVE}) {
+						# Creates the timer to send periodic ping
+						$this->{alive_handler} = AnyEvent->timer(
+							after => $this->{REFRESH},
+							interval => $this->{REFRESH},
+							cb => sub {
+								my $late = time() - $this->{last_alive_message};
+								if ($late > $this->{MAX_ALIVE}) {
+									print STDERR "Sending ping (${late}s without message)\n" if $this->{DEBUG};
+									$this->ping();
+								}
+							}
+						);
 					}
 				}
 				# Call the callback of the method
@@ -167,12 +186,10 @@ sub connect {
 		$this->{WSHANDLE}->on(finish => sub {
 			my($cnx) = @_;
 			my $reason = $cnx->close_reason();
-			do {
-				$reason = (decode_json $reason)->{reason};
-			};
 			
 			print STDERR "Centrifugo::Client : Connection closed (reason=$reason)\n" if $this->{DEBUG};
 			$this->{ON}->{'ws_closed'}->($reason) if $this->{ON}->{'ws_closed'};
+			undef $this->{alive_handler};
 			undef $this->{WSHANDLE};
 			undef $this->{CLIENT_ID};
 		});
@@ -213,8 +230,7 @@ sub publish {
 		method => 'publish',
 		params => \%PARAMS
 	};
-	print STDERR "Centrifugo::Client : WS > $PUBLISH\n" if $this->{DEBUG};
-	$this->{WSHANDLE}->send( $PUBLISH );
+	$this->_send_message($PUBLISH);
 	return $uid;
 }
 
@@ -279,8 +295,7 @@ sub _channel_command {
 		method => $command,
 		params => \%PARAMS
 	};
-	print STDERR "Centrifugo::Client : WS > $MSG\n" if $this->{DEBUG};
-	$this->{WSHANDLE}->send($MSG);
+	$this->_send_message($MSG);
 	return $uid;
 }
 
@@ -338,8 +353,7 @@ sub ping {
 		UID => $uid ,
 		method => 'ping'
 	};
-	print STDERR "Centrifugo::Client : WS > $MSG\n" if $this->{DEBUG};
-	$this->{WSHANDLE}->send($MSG);
+	$this->_send_message($MSG);
 	return $uid;
 }
 
@@ -413,6 +427,14 @@ sub generate_token {
 }
 
 ##### (kinda)-private functions
+
+sub _send_message {
+	my ($this,$MSG)=@_;
+	print STDERR "Centrifugo::Client : S> WebSocket : $MSG\n" if $this->{DEBUG};
+	$this->{WSHANDLE}->send($MSG);
+	
+}
+
 
 # Generates a random Id for commands
 sub _generate_random_id {
