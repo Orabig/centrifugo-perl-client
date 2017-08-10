@@ -157,14 +157,11 @@ sub connect {
 			}
 		});
 
-		unless ($^O=~/Win/i) {
-			# This event seems to be unrecognized on Windows (?)
-			$this->{WSHANDLE}->on(parse_error => sub {
-				my($cnx, $error) = @_;
-				warn "Error in Centrifugo::Client : $error";
-				$this->{ON}->{'error'}->($error) if $this->{ON}->{'error'};
-			});
-		}
+		$this->{WSHANDLE}->on(parse_error => sub {
+			my($cnx, $error) = @_;
+			warn "Error in Centrifugo::Client : $error";
+			$this->{ON}->{'error'}->($error) if $this->{ON}->{'error'};
+		});
 
 		# handle a closed connection...
 		$this->{WSHANDLE}->on(finish => sub {
