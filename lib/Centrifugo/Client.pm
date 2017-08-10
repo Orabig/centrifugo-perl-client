@@ -4,7 +4,7 @@ our $VERSION = "1.03";
 
 use Exporter;
 our @ISA = qw(Exporter);
-our @EXPORT = qw();
+our @EXPORT = qw(generate_token);
 
 use Carp qw( croak );
 use AnyEvent::WebSocket::Client 0.40; # Version needed for reason when close. See https://github.com/plicease/AnyEvent-WebSocket-Client/issues/30
@@ -300,7 +300,7 @@ sub unsubscribe {
 	return _channel_command($this,'unsubscribe',%PARAMS);
 }
 
-=head1 FUNCTION presence – allows to ask server for channel presence information.
+=head1 FUNCTION presence - allows to ask server for channel presence information.
 
 $client->presence( channel => $channel, [ uid => $uid ] );
 
@@ -313,7 +313,7 @@ sub presence {
 	return _channel_command($this,'presence',%PARAMS);
 }
 
-=head1 FUNCTION history – allows to ask server for channel presence information.
+=head1 FUNCTION history - allows to ask server for channel presence information.
 
 $client->history( channel => $channel, [ uid => $uid ] );
 
@@ -326,7 +326,7 @@ sub history {
 	return _channel_command($this,'history',%PARAMS);
 }
 
-=head1 FUNCTION ping – allows to send ping command to server, server will answer this command with ping response.
+=head1 FUNCTION ping - allows to send ping command to server, server will answer this command with ping response.
 
 $client->ping( [ uid => $uid ] );
 
@@ -346,9 +346,7 @@ sub ping {
 	return $uid;
 }
 
-=head1 FUNCTION on
-
-Register a callback for the given event.
+=head1 FUNCTION on - Register a callback for the given event.
 
 Known events are 'message', 'connect', 'disconnect', 'subscribe', 'unsubscribe', 'publish', 'presence', 'history', 'join', 'leave',
 'refresh', 'ping', 'ws_closed', 'ws_error'
@@ -370,9 +368,9 @@ sub on {
 	$this;
 }
 
-=head1 FUNCTION client_id
+=head1 FUNCTION client_id - return the client_id if it is connected to Centrifugo and the server returned this ID (which is not the case on the demo server).
 
-$client->client_id() return the client_id if it is connected to Centrifugo and the server returned this ID (which is not the case on the demo server).
+$client->client_id() 
 
 =cut
 
@@ -382,6 +380,41 @@ sub client_id {
 }
 
 
+=head1 FUNCTION generate_token - return the private token that must be used to connect a client to Centrifugo.
+
+$key = Centrifugo::Client::generate_token($secret, $user, $timestamp [,$info])
+
+INPUT : $secret is the private secret key, only known by the server.
+
+        $user is the user name.
+        
+        $timestamp is the current timestamp.
+        
+        $info is a JSON encoded string.
+
+The same function may be used to generate a private channel key :
+
+    $key = generate_token($secret, $client, $channel [,$info])
+
+INPUT : $client is the client_id given when connected to Centrifugo.
+
+        $channel is the name of the channel (should start with a '$' as it is private).
+
+And to sign each request to access to the HTTP API :
+
+    $sign = generate_token($self, $data)
+
+INPUT : $data is a JSON string with your API commands
+
+=cut
+
+sub generate_token {
+	my ($secret, @infos)=@_;
+	my $info = join'', @infos;
+	use Digest::SHA qw( hmac_sha256_hex );
+	return hmac_sha256_hex( $info, $secret );
+}
+
 ##### (kinda)-private functions
 
 # Generates a random Id for commands
@@ -389,5 +422,4 @@ sub _generate_random_id {
 	my @c = ('a'..'z','A'..'Z',0..9);
 	return join '', @c[ map{ rand @c } 1 .. 12 ];
 }
-
 1;

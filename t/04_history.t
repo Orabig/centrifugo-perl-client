@@ -10,7 +10,7 @@ my $DEBUG = 0;
 
 use Test::More tests => 4; # Connect, subscribe, send 2 random messages, check history
 
-use Centrifugo::Client;
+use Centrifugo::Client qw!generate_token!;
 
 sub getRandomId() {
 	my $id = hmac_sha256_hex(rand());
@@ -33,7 +33,7 @@ SKIP: {
 	my $message = "Secret message : ".getRandomId();
 	my $message2 = "Secret message : ".getRandomId();
 	
-	my $TOKEN = hmac_sha256_hex( $USER, $TIMESTAMP, $SECRET );
+	my $TOKEN = generate_token( $SECRET, $USER, $TIMESTAMP );
 	
 	my $cclient = Centrifugo::Client->new("ws://$CENTRIFUGO_DEMO/connection/websocket", debug => $DEBUG );
 
