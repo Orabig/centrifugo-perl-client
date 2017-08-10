@@ -238,7 +238,7 @@ sub disconnect {
 
 $client->subscribe( channel => $channel, [ client => $clientId  ,] [ uid => $uid ,] );
 
-If the channel is private (starts with a '$'), then a request to $this->{AUTH_URL} must be done to get the channel key. In that case, clientId is mandatory.
+If the channel is private (starts with a '$'), then a request to $this->{AUTH_URL} is done automatically to get the channel key. In that case, the 'client' parameter is mandatory.
 
 This function returns the UID used to send the command to the server. (a random string if none is provided)
 
@@ -249,7 +249,7 @@ sub subscribe {
 	my $channel = $PARAMS{channel};
 	return _channel_command($this,'subscribe',%PARAMS) unless $channel=~/^\$/;
 	# If the channel is private, then an API-call to /centrifuge/auth/ must be done
-	croak "'clientId' parameter is mandatory to subscribe to private channels" unless $PARAMS{client};
+	croak "'client' parameter is mandatory to subscribe to private channels in Centrifugo::Client->subscribe(...)" unless $PARAMS{client};
 
 	# Request a channel key
 	my $data = encode_json {
