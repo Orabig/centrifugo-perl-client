@@ -4,7 +4,7 @@ Centrifugo::Client : A server-side Perl client for centrifugo
 
 https://github.com/Orabig/centrifugo-perl-client
 
-This module can be used to connect to a Centrifugo server with WebSockets.
+This module can be used to connect to a Centrifugo server with WebSockets. (Note: it does not provide access to the HTTP API of Centrifugo)
 
 More info about Centrifugo :
 https://github.com/centrifugal/centrifugo or https://fzambia.gitbooks.io/centrifugal/content/
