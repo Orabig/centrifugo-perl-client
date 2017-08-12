@@ -100,9 +100,9 @@ $client->connect(
 		[uid => $uid,]
 		);
 
-(this function retuns $self to allow chains of multiple function calls)
+This function retuns $self to allow chains of multiple function calls.
 		
-It is possible to provide a UID for this command, but if you don't, a random one will be generated for you, but cannot be retrieved afterward.
+It is possible to provide a UID for this command, but if you don't, a random one will be generated for you and cannot be retrieved afterward.
 
 =cut
 
@@ -113,39 +113,83 @@ sub connect {
 	croak("Missing token in Centrifugo::Client->connect(...)") if ! $PARAMS{token};
 	# Fix parameters sent to Centrifugo
 	$PARAMS{timestamp}="$PARAMS{timestamp}" if $PARAMS{timestamp}; # This MUST be a string
-	my $uid=delete $PARAMS{uid} || _generate_random_id();
+	# Save the Centrifugo connection parameters
+	$this->{CNX_UID} = delete $PARAMS{uid} || _generate_random_id();
+	$this->{CNX_PARAMS} = \%PARAMS;
 	
-	my $ws_url = $this->{WS_URL};
-	$this->{WEBSOCKET}->connect( $ws_url )->cb(sub {
-		# Connects to Websocket
+	# Connects to Websocket
+	$this->_reset_reconnect_sequence();
+	$this->_connect();
+	return $this;
+}
+
+# This function (re)connects to the websocket
+sub _connect {
+	my ($this) = @_;
+	$this->{WEBSOCKET}->connect( $this->{WS_URL} )->cb(sub {
 		$this->{WSHANDLE} = eval { shift->recv };
-		if($@) {
-			# handle error...
-			warn "Error in Centrifugo::Client : $@";
-			$this->{ON}->{'error'}->($@) if $this->{ON}->{'error'};
+		if ($@) {
+			$this->_on_error($@);
+			$this->_reconnect();
 			return;
 		}
-
 		# The websocket connection is OK
-		print STDERR "Centrifugo::Client : WebSocket connected to $ws_url\n" if $this->{DEBUG};
-		
-		# Now, send a CONNECT message to Centrifugo
-		$this->{WSHANDLE}->on(each_message => sub { $this->_on_message($_[1]) });
-		$this->{WSHANDLE}->on(finish => sub { $this->_on_close(($_[0])->close_reason()) });
-		$this->{WSHANDLE}->on(parse_error => sub {
-			my($cnx, $error) = @_;
-			warn "Error in Centrifugo::Client : $error";
-			$this->{ON}->{'error'}->($error) if $this->{ON}->{'error'};
-		});
-
-		$this->_send_message( {
-			method => 'connect',
-			UID => $uid,
-			params => \%PARAMS
-		} );
-
+		$this->_on_ws_connect();
 	});
-	$this;
+}
+
+# This function is called when client is connected to the WebSocket
+sub _on_ws_connect {
+	my ($this) = @_;
+	print STDERR "Centrifugo::Client : WebSocket connected to $this->{WS_URL}\n" if $this->{DEBUG};
+	
+	# define the callbacks
+	$this->{WSHANDLE}->on(each_message => sub { $this->_on_message($_[1]) });
+	$this->{WSHANDLE}->on(finish => sub { $this->_on_close(($_[0])->close_reason()) });
+	$this->{WSHANDLE}->on(parse_error => sub {
+		my($cnx, $error) = @_;
+		print STDERR "Error in Centrifugo::Client : $error\n" if $this->{DEBUG};
+		$this->{ON}->{'error'}->($error) if $this->{ON}->{'error'};
+	});
+	
+	# Then, connects to Centrifugo
+	$this->_send_message( {
+		method => 'connect',
+		UID => $this->{CNX_UID},
+		params => $this->{CNX_PARAMS}
+	} );
+}
+
+# This function is called when client is connected to Centrifugo
+sub _on_connect {
+	my ($this, $body) = @_;
+	print STDERR "Centrifugo::Client : Connected to Centrifugo : $body\n" if $this->{DEBUG};	
+	# on Connect, the client_id must be read (if available)
+	if ($body && ref($body) eq 'HASH' && $body->{client}) {
+		$this->{CLIENT_ID} = $body->{client};
+		print STDERR "Centrifugo::Client : CLIENT_ID=".$this->{CLIENT_ID}."\n" if $this->{DEBUG};
+	}
+	$this->_init_keep_alive_timer() if $this->{MAX_ALIVE};
+	print STDERR "Centrifugo::Client : _reset_reconnect_sequence( _on_connect )";
+	$this->_reset_reconnect_sequence();
+}
+
+# This function is called when the connection with server is lost
+sub _on_close {
+	my ($this, $message) = @_;
+	print STDERR "Centrifugo::Client : Connection closed (reason=$message)\n" if $this->{DEBUG};
+	$this->{ON}->{'ws_closed'}->($message) if $this->{ON}->{'ws_closed'};
+	undef $this->{alive_handler};
+	undef $this->{WSHANDLE};
+	undef $this->{CLIENT_ID};
+	$this->_reconnect();
+}
+
+# This function is called if an errors occurs with the server
+sub _on_error {
+	my ($this, @infos) = @_;
+	warn "Error in Centrifugo::Client : @infos";
+	$this->{ON}->{'error'}->(@infos) if $this->{ON}->{'error'};
 }
 
 # This function is called once for each message received from Centrifugo
@@ -164,27 +208,8 @@ sub _on_message {
 		my $method = $info->{method};
 		my $error = $info->{error};
 		my $body = $info->{body}; # Not the same 'body' as above
-		if ($method eq 'connect') {
-			# on Connect, the client_id must be read (if available)
-			if ($body && ref($body) eq 'HASH' && $body->{client}) {
-				$this->{CLIENT_ID} = $body->{client};
-				print STDERR "Centrifugo::Client : CLIENT_ID=".$this->{CLIENT_ID}."\n" if $this->{DEBUG};
-			}
-			if ($this->{MAX_ALIVE}) {
-				# Creates the timer to send periodic ping
-				$this->{alive_handler} = AnyEvent->timer(
-					after => $this->{REFRESH},
-					interval => $this->{REFRESH},
-					cb => sub {
-						my $late = time() - $this->{last_alive_message};
-						if ($late > $this->{MAX_ALIVE}) {
-							print STDERR "Sending ping (${late}s without message)\n" if $this->{DEBUG};
-							$this->ping();
-						}
-					}
-				);
-			}
-		}
+		$this->_on_connect( $body ) if $method eq 'connect';
+
 		# Call the callback of the method
 		my $sub = $this->{ON}->{$method};
 		if ($sub) {
@@ -197,14 +222,45 @@ sub _on_message {
 	}
 }
 
-# This function is called when the connection with server is lost
-sub _on_close {
-	my ($this, $message) = @_;
-	print STDERR "Centrifugo::Client : Connection closed (reason=$message)\n" if $this->{DEBUG};
-	$this->{ON}->{'ws_closed'}->($message) if $this->{ON}->{'ws_closed'};
-	undef $this->{alive_handler};
-	undef $this->{WSHANDLE};
-	undef $this->{CLIENT_ID};
+# Inits the Fibonacci sequence for reconnection retries
+sub _reset_reconnect_sequence {
+	my ($this) = @_;
+	$this->{last_retry} = 0;
+	$this->{next_retry} = $this->{RETRY};
+}
+
+# Reconnects to the server after a loss of connection
+# When client disconnected from server it will automatically try to reconnect using 
+# fibonacci sequence to get interval between reconnect attempts which value grows exponentially. (why not ?)
+sub _reconnect {
+	my ($this) = @_;
+	my $retry_after = $this->{next_retry};
+	$retry_after = $this->{MAX_RETRY} if $retry_after > $this->{MAX_RETRY};
+	print STDERR "Centrifugo::Client : will reconnect after $retry_after s.\n" if $this->{DEBUG};
+	$this->{reconnect_handler} = AnyEvent->timer(
+		after => $retry_after,
+		cb => sub {
+			$this->{next_retry} += $this->{last_retry};
+			$this->{last_retry} = $retry_after;
+			$this->_connect();
+		}
+	);
+}
+
+# Creates the timer to send periodic ping
+sub _init_keep_alive_timer {
+	my ($this) = @_;
+	$this->{alive_handler} = AnyEvent->timer(
+		after => $this->{REFRESH},
+		interval => $this->{REFRESH},
+		cb => sub {
+			my $late = time() - $this->{last_alive_message};
+			if ($late > $this->{MAX_ALIVE}) {
+				print STDERR "Sending ping (${late}s without message)\n" if $this->{DEBUG};
+				$this->ping();
+			}
+		}
+	);
 }
 
 =head1 FUNCTION publish - allows clients directly publish messages into channel (use with caution. Client->Server communication is NOT the aim of Centrifugo)
