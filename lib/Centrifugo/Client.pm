@@ -61,8 +61,11 @@ or
 	my $client = Centrifugo::Client->new( $URL,
 	   debug => 'true',          # If true, some informations are written on STDERR
 	   authEndpoint => "...",    # The full URL used to ask for a key to subscribe to private channels
-	   max_alive_period => 30,   # If max_alive_period has passed since last communication with server, a PING is send (default 0)
+	   max_alive_period => 30,   # interval (in s) since last communication with server that triggers a PING (default 0)
 	   refresh_period => 5,      # Check frequency for max_alive_period (default 10s)
+	   retry => 0.5 ,            # interval (in ms) between reconnect attempts which value grows exponentially (default 1.0)
+	   max_retry => 30,          # upper interval value limit when reconnecting. (default 30)
+	   recover => 'true',        # Recovers the lost messages after a reconnection (default: 'false')
 	   ws_params => {            # These parameters are passed to AnyEvent::WebSocket::Client->new(...)
 			 ssl_no_verify => 'true',
 			 timeout => 600
@@ -81,6 +84,9 @@ sub new {
 	$this->{WEBSOCKET} = AnyEvent::WebSocket::Client -> new( %{$params{ws_params}} );
 	$this->{MAX_ALIVE} = $params{max_alive_period} || 0;
 	$this->{REFRESH} = $params{refresh_period} || 10;
+	$this->{RETRY} = $params{retry} || 1;
+	$this->{MAX_RETRY} = $params{max_retry} || 30;
+	$this->{RECOVER} = $params{recover};
 	return $this;
 }
 
@@ -105,7 +111,12 @@ sub connect {
 	croak("Missing user in Centrifugo::Client->connect(...)") if ! $PARAMS{user};
 	croak("Missing timestamp in Centrifugo::Client->connect(...)") if ! $PARAMS{timestamp};
 	croak("Missing token in Centrifugo::Client->connect(...)") if ! $PARAMS{token};
-	$this->{WEBSOCKET}->connect( $this->{WS_URL} )->cb(sub {
+	# Fix parameters sent to Centrifugo
+	$PARAMS{timestamp}="$PARAMS{timestamp}" if $PARAMS{timestamp}; # This MUST be a string
+	my $uid=delete $PARAMS{uid} || _generate_random_id();
+	
+	my $ws_url = $this->{WS_URL};
+	$this->{WEBSOCKET}->connect( $ws_url )->cb(sub {
 		# Connects to Websocket
 		$this->{WSHANDLE} = eval { shift->recv };
 		if($@) {
@@ -114,90 +125,86 @@ sub connect {
 			$this->{ON}->{'error'}->($@) if $this->{ON}->{'error'};
 			return;
 		}
-		
-		# Fix parameters sent to Centrifugo
-		$PARAMS{timestamp}="$PARAMS{timestamp}" if $PARAMS{timestamp}; # This MUST be a string
-		
-		my $uid=$PARAMS{uid} || _generate_random_id();
-		delete $PARAMS{uid};
-		# Sends a CONNECT message to Centrifugo
-		my $CONNECT=encode_json {
-			UID => $uid,
-			method => 'connect',
-			params => \%PARAMS
-		};
-		
-		print STDERR "Centrifugo::Client : WebSocket > $CONNECT\n" if $this->{DEBUG};
-		$this->{WSHANDLE}->on(each_message => sub {
-			my($loop, $message) = @_;
-			print STDERR "Centrifugo::Client : R< WS : $message->{body}\n" if $this->{DEBUG};
-			$this->{last_alive_message} = time();
-			my $fullbody = decode_json($message->{body});
-			# Handle a body containing {response}
-			if (ref($fullbody) eq 'HASH') {
-				$fullbody = [ $fullbody ];
-			}
-			# Handle a body containing [{response},{response}...]
-			foreach my $info (@$fullbody) {
-				my $uid = $info->{uid};
-				my $method = $info->{method};
-				my $error = $info->{error};
-				my $body = $info->{body}; # Not the same 'body' as above
-				if ($method eq 'connect') {
-					# on Connect, the client_id must be read (if available)
-					if ($body && ref($body) eq 'HASH' && $body->{client}) {
-						$this->{CLIENT_ID} = $body->{client};
-						print STDERR "Centrifugo::Client : CLIENT_ID=".$this->{CLIENT_ID}."\n" if $this->{DEBUG};
-					}
-					if ($this->{MAX_ALIVE}) {
-						# Creates the timer to send periodic ping
-						$this->{alive_handler} = AnyEvent->timer(
-							after => $this->{REFRESH},
-							interval => $this->{REFRESH},
-							cb => sub {
-								my $late = time() - $this->{last_alive_message};
-								if ($late > $this->{MAX_ALIVE}) {
-									print STDERR "Sending ping (${late}s without message)\n" if $this->{DEBUG};
-									$this->ping();
-								}
-							}
-						);
-					}
-				}
-				# Call the callback of the method
-				my $sub = $this->{ON}->{$method};
-				if ($sub) {
-					# Add UID into body if available
-					if ($uid) {
-						$body->{uid}=$uid;
-					}
-					$sub->( $body );
-				}
-			}
-		});
 
+		# The websocket connection is OK
+		print STDERR "Centrifugo::Client : WebSocket connected to $ws_url\n" if $this->{DEBUG};
+		
+		# Now, send a CONNECT message to Centrifugo
+		$this->{WSHANDLE}->on(each_message => sub { $this->_on_message($_[1]) });
+		$this->{WSHANDLE}->on(finish => sub { $this->_on_close(($_[0])->close_reason()) });
 		$this->{WSHANDLE}->on(parse_error => sub {
 			my($cnx, $error) = @_;
 			warn "Error in Centrifugo::Client : $error";
 			$this->{ON}->{'error'}->($error) if $this->{ON}->{'error'};
 		});
 
-		# handle a closed connection...
-		$this->{WSHANDLE}->on(finish => sub {
-			my($cnx) = @_;
-			my $reason = $cnx->close_reason();
-			
-			print STDERR "Centrifugo::Client : Connection closed (reason=$reason)\n" if $this->{DEBUG};
-			$this->{ON}->{'ws_closed'}->($reason) if $this->{ON}->{'ws_closed'};
-			undef $this->{alive_handler};
-			undef $this->{WSHANDLE};
-			undef $this->{CLIENT_ID};
-		});
-
-		$this->{WSHANDLE}->send($CONNECT);
+		$this->_send_message( {
+			method => 'connect',
+			UID => $uid,
+			params => \%PARAMS
+		} );
 
 	});
 	$this;
+}
+
+# This function is called once for each message received from Centrifugo
+sub _on_message {
+	my ($this, $message) = @_;
+	print STDERR "Centrifugo::Client : R< WS : $message->{body}\n" if $this->{DEBUG};
+	$this->{last_alive_message} = time();
+	my $fullbody = decode_json($message->{body});
+	# Handle a body containing {response}
+	if (ref($fullbody) eq 'HASH') {
+		$fullbody = [ $fullbody ];
+	}
+	# Handle a body containing [{response},{response}...]
+	foreach my $info (@$fullbody) {
+		my $uid = $info->{uid};
+		my $method = $info->{method};
+		my $error = $info->{error};
+		my $body = $info->{body}; # Not the same 'body' as above
+		if ($method eq 'connect') {
+			# on Connect, the client_id must be read (if available)
+			if ($body && ref($body) eq 'HASH' && $body->{client}) {
+				$this->{CLIENT_ID} = $body->{client};
+				print STDERR "Centrifugo::Client : CLIENT_ID=".$this->{CLIENT_ID}."\n" if $this->{DEBUG};
+			}
+			if ($this->{MAX_ALIVE}) {
+				# Creates the timer to send periodic ping
+				$this->{alive_handler} = AnyEvent->timer(
+					after => $this->{REFRESH},
+					interval => $this->{REFRESH},
+					cb => sub {
+						my $late = time() - $this->{last_alive_message};
+						if ($late > $this->{MAX_ALIVE}) {
+							print STDERR "Sending ping (${late}s without message)\n" if $this->{DEBUG};
+							$this->ping();
+						}
+					}
+				);
+			}
+		}
+		# Call the callback of the method
+		my $sub = $this->{ON}->{$method};
+		if ($sub) {
+			# Add UID into body if available
+			if ($uid) {
+				$body->{uid}=$uid;
+			}
+			$sub->( $body );
+		}
+	}
+}
+
+# This function is called when the connection with server is lost
+sub _on_close {
+	my ($this, $message) = @_;
+	print STDERR "Centrifugo::Client : Connection closed (reason=$message)\n" if $this->{DEBUG};
+	$this->{ON}->{'ws_closed'}->($message) if $this->{ON}->{'ws_closed'};
+	undef $this->{alive_handler};
+	undef $this->{WSHANDLE};
+	undef $this->{CLIENT_ID};
 }
 
 =head1 FUNCTION publish - allows clients directly publish messages into channel (use with caution. Client->Server communication is NOT the aim of Centrifugo)
@@ -225,12 +232,11 @@ sub publish {
 	croak("Missing data in Centrifugo::Client->publish(...)") unless $PARAMS{data};
 	my $uid = $PARAMS{'uid'} || _generate_random_id();
 	delete $PARAMS{'uid'};
-	my $PUBLISH = encode_json {
+	$this->_send_message({
 		UID => $uid,
 		method => 'publish',
 		params => \%PARAMS
-	};
-	$this->_send_message($PUBLISH);
+	});
 	return $uid;
 }
 
@@ -290,7 +296,7 @@ sub _channel_command {
 #	my $channel = $PARAMS{'channel'};
 #	croak("Missing channel in Centrifugo::Client->$command(...)") unless $PARAMS{'channel'};
 	my $uid = $PARAMS{'uid'} || _generate_random_id();
-	my $MSG = encode_json {
+	my $MSG = {
 		UID => $uid ,
 		method => $command,
 		params => \%PARAMS
@@ -349,7 +355,7 @@ This function returns the UID used to send the command to the server. (a random 
 sub ping {
 	my ($this,%PARAMS) = @_;
 	my $uid = $PARAMS{'uid'} || _generate_random_id();
-	my $MSG = encode_json {
+	my $MSG = {
 		UID => $uid ,
 		method => 'ping'
 	};
@@ -430,6 +436,7 @@ sub generate_token {
 
 sub _send_message {
 	my ($this,$MSG)=@_;
+	$MSG = encode_json $MSG;
 	print STDERR "Centrifugo::Client : S> WebSocket : $MSG\n" if $this->{DEBUG};
 	$this->{WSHANDLE}->send($MSG);
 	
