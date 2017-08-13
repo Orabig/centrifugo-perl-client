@@ -146,14 +146,14 @@ sub _connect {
 # This function is called when client is connected to the WebSocket
 sub _on_ws_connect {
 	my ($this) = @_;
-	print STDERR "Centrifugo::Client : WebSocket connected to $this->{WS_URL}\n" if $this->{DEBUG};
+	$this->_debug( "Centrifugo::Client : WebSocket connected to $this->{WS_URL}" );
 	
 	# define the callbacks
 	$this->{WSHANDLE}->on(each_message => sub { $this->_on_ws_message($_[1]) });
 	$this->{WSHANDLE}->on(finish => sub { $this->_on_close(($_[0])->close_reason()) });
 	$this->{WSHANDLE}->on(parse_error => sub {
 		my($cnx, $error) = @_;
-		print STDERR "Error in Centrifugo::Client : $error\n" if $this->{DEBUG};
+		$this->_debug( "Error in Centrifugo::Client : $error" );
 		$this->{ON}->{'error'}->($error) if $this->{ON}->{'error'};
 	});
 	
@@ -168,11 +168,11 @@ sub _on_ws_connect {
 # This function is called when client is connected to Centrifugo
 sub _on_connect {
 	my ($this, $body) = @_;
-	print STDERR "Centrifugo::Client : Connected to Centrifugo : ".encode_json $body if $this->{DEBUG};	
+	$this->_debug( "Centrifugo::Client : Connected to Centrifugo : ".encode_json $body );	
 	# on Connect, the client_id must be read (if available)
 	if ($body && ref($body) eq 'HASH' && $body->{client}) {
 		$this->{CLIENT_ID} = $body->{client};
-		print STDERR "Centrifugo::Client : CLIENT_ID=".$this->{CLIENT_ID}."\n" if $this->{DEBUG};
+		$this->_debug( "Centrifugo::Client : CLIENT_ID=".$this->{CLIENT_ID} );
 	}
 	$this->_init_keep_alive_timer() if $this->{MAX_ALIVE};
 	$this->_reset_reconnect_sequence();
@@ -184,7 +184,7 @@ sub _on_message {
 	my ($this, $body) = @_;
 	my $uid = $body->{uid};
 	my $channel = $body->{channel};
-	print STDERR "Centrifugo::Client : Message from $channel : ".encode_json $body->{data} if $this->{DEBUG};
+	$this->_debug( "Centrifugo::Client : Message from $channel : ".encode_json $body->{data} );
 	$this->{_channels}->{ $channel }->{last} = $uid; # Keeps track of last IDs of messages
 }
 
@@ -192,7 +192,7 @@ sub _on_message {
 sub _on_subscribe {
 	my ($this, $body) = @_;
 	my $channel = $body->{channel};
-	print STDERR "Centrifugo::Client : Subscribed to $channel : ".encode_json $body if $this->{DEBUG};
+	$this->_debug( "Centrifugo::Client : Subscribed to $channel : ".encode_json $body );
 	if ($body->{recovered} == JSON::true) {
 		# Re-emits the lost messages
 		my $messages = $body->{messages};
@@ -213,7 +213,7 @@ sub _on_subscribe {
 sub _on_unsubscribe {
 	my ($this, $body) = @_;
 	my $channel = $body->{channel};
-	print STDERR "Centrifugo::Client : Unsubscribed from $body->{channel} : ".encode_json $body if $this->{DEBUG};
+	$this->_debug( "Centrifugo::Client : Unsubscribed from $body->{channel} : ".encode_json $body );
 	# Keeps track of channels
 	$channel=~s/&.*/&/; # Client channel boundary
 	delete $this->{_channels}->{ $channel };	
@@ -225,7 +225,7 @@ sub _on_unsubscribe {
 sub _resubscribe {
 	my ($this) = @_;
 	foreach my $channel (keys %{$this->{_channels}}) {
-		print STDERR "Centrifugo::Client : Resubscribe to $channel" if $this->{DEBUG};
+		$this->_debug( "Centrifugo::Client : Resubscribe to $channel" );
 		$channel=~s/&.*/&/; # Client channel boundary
 		my $params = {
 			channel => $channel
@@ -241,7 +241,8 @@ sub _resubscribe {
 # This function is called when the connection with server is lost
 sub _on_close {
 	my ($this, $message) = @_;
-	print STDERR "Centrifugo::Client : Connection closed (reason=$message)\n" if $this->{DEBUG};
+	$message="(none)" unless $message;
+	$this->_debug( "Centrifugo::Client : Connection closed, reason=$message" );
 	$this->{ON}->{'ws_closed'}->($message) if $this->{ON}->{'ws_closed'};
 	undef $this->{_alive_handler};
 	undef $this->{WSHANDLE};
@@ -261,7 +262,7 @@ sub _on_error {
 # This function is called once for each message received from Centrifugo
 sub _on_ws_message {
 	my ($this, $message) = @_;
-	print STDERR "Centrifugo::Client : Recv < WebSocket : $message->{body}\n" if $this->{DEBUG_WS};
+	$this->_debug_ws("Send > WebSocket : $message->{body}");
 	$this->{_last_alive_message} = time();
 	my $fullbody = decode_json($message->{body}); # The body of websocket message
 	# Handle a body containing {response} : converts into a singleton
@@ -304,7 +305,7 @@ sub _reconnect {
 	my ($this) = @_;
 	my $retry_after = $this->{_next_retry} > $this->{MAX_RETRY} ? $this->{MAX_RETRY} : $this->{_next_retry};
 	$retry_after = int($retry_after) if $retry_after > 3;
-	print STDERR "Centrifugo::Client : will reconnect after $retry_after s.\n" if $this->{DEBUG};
+	$this->_debug( "Centrifugo::Client : will reconnect after $retry_after s." );
 	$this->{reconnect_handler} = AnyEvent->timer(
 		after => $retry_after,
 		cb => sub {
@@ -324,7 +325,7 @@ sub _init_keep_alive_timer {
 		cb => sub {
 			my $late = time() - $this->{_last_alive_message};
 			if ($late > $this->{MAX_ALIVE}) {
-				print STDERR "Sending ping (${late}s without message)\n" if $this->{DEBUG};
+				$this->_debug( "Sending ping (${late}s without message)" );
 				$this->ping();
 			}
 		}
@@ -401,7 +402,7 @@ sub subscribe {
 	# If the client is not connected, then delay the subscribing
 	unless ($this->client_id()) {
 		my $error = "Can't subscribe to channel '$channel' yet : Client is not connected (will try again when connected)";
-		print STDERR "Error in Centrifugo::Client : $error\n" if $this->{DEBUG};
+		$this->_debug( "Error in Centrifugo::Client : $error" );
 		$this->{ON}->{'error'}->($error) if $this->{ON}->{'error'};
 		# Register the channel so that we can subscribe when the client is connected
 		$this->{_channels}->{ $channel } = { status => JSON::false };
@@ -591,8 +592,20 @@ sub generate_token {
 sub _send_message {
 	my ($this,$MSG)=@_;
 	$MSG = encode_json $MSG;
-	print STDERR "Centrifugo::Client : Send > WebSocket : $MSG\n" if $this->{DEBUG_WS};
+	$this->_debug_ws("Send > WebSocket : $MSG");
 	$this->{WSHANDLE}->send($MSG);
+}
+
+sub _debug {
+	my ($this,$MSG)=@_;
+	local $\; $\="\n";
+	print STDERR "Centrifugo::Client : $MSG" if $this->{DEBUG};
+}
+
+sub _debug_ws {
+	my ($this,$MSG)=@_;
+	local $\; $\="\n";
+	print STDERR "Centrifugo::Client : $MSG" if $this->{DEBUG_WS};
 }
 
 
