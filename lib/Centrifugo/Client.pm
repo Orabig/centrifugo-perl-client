@@ -60,6 +60,7 @@ or
 
 	my $client = Centrifugo::Client->new( $URL,
 	   debug => 'true',          # If true, some informations are written on STDERR
+	   debug_ws => 'true',       # If true, all web socket messages are written on STDERR
 	   authEndpoint => "...",    # The full URL used to ask for a key to subscribe to private channels
 	   max_alive_period => 30,   # interval (in s) since last communication with server that triggers a PING (default 0)
 	   refresh_period => 5,      # Check frequency for max_alive_period (default 10s)
@@ -81,6 +82,7 @@ sub new {
 	bless($this, $class);
 	$this->{WS_URL} = $ws_url;
 	$this->{DEBUG} = $params{debug} && $params{debug}!~/^(0|false|no)$/i; delete $params{debug};
+	$this->{DEBUG_WS} = $params{debug_ws} && $params{debug_ws}!~/^(0|false|no)$/i; delete $params{debug_ws};
 	$this->{AUTH_URL} = delete $params{authEndpoint} || "/centrifuge/auth/";
 	$this->{WEBSOCKET} = AnyEvent::WebSocket::Client -> new( %{$params{ws_params}} ); delete $params{ws_params};
 	$this->{MAX_ALIVE} = delete $params{max_alive_period} || 0;
@@ -201,6 +203,7 @@ sub _on_subscribe {
 		}
 	}
 	# Keeps track of channels
+	$channel=~s/&.*/&/; # Client channel boundary
 	$this->{_channels}->{ $channel } = $body;
 	$this->{_subscribed_channels}->{ $channel } = 1; # TEST if it worked
 	delete $this->{_pending_subscriptions}->{ $channel };
@@ -212,6 +215,7 @@ sub _on_unsubscribe {
 	my $channel = $body->{channel};
 	print STDERR "Centrifugo::Client : Unsubscribed from $body->{channel} : ".encode_json $body if $this->{DEBUG};
 	# Keeps track of channels
+	$channel=~s/&.*/&/; # Client channel boundary
 	delete $this->{_channels}->{ $channel };	
 	delete $this->{_subscribed_channels}->{ $channel };
 	delete $this->{_pending_subscriptions}->{ $channel };
@@ -219,9 +223,10 @@ sub _on_unsubscribe {
 
 # This function automatically reconnects to channels
 sub _resubscribe {
-	my ($this) = @_;print "_resub";
+	my ($this) = @_;
 	foreach my $channel (keys %{$this->{_channels}}) {
 		print STDERR "Centrifugo::Client : Resubscribe to $channel" if $this->{DEBUG};
+		$channel=~s/&.*/&/; # Client channel boundary
 		my $params = {
 			channel => $channel
 		};
@@ -256,7 +261,7 @@ sub _on_error {
 # This function is called once for each message received from Centrifugo
 sub _on_ws_message {
 	my ($this, $message) = @_;
-	print STDERR "Centrifugo::Client : R< WS : $message->{body}\n" if $this->{DEBUG};
+	print STDERR "Centrifugo::Client : Recv < WebSocket : $message->{body}\n" if $this->{DEBUG_WS};
 	$this->{_last_alive_message} = time();
 	my $fullbody = decode_json($message->{body}); # The body of websocket message
 	# Handle a body containing {response} : converts into a singleton
@@ -351,6 +356,7 @@ sub publish {
 	croak("Missing data in Centrifugo::Client->publish(...)") unless $PARAMS{data};
 	my $uid = $PARAMS{'uid'} || _generate_random_id();
 	delete $PARAMS{'uid'};
+	$PARAMS{channel}=~s/&.*/'&' . $this->client_id()/e; # Client channel boundary
 	$this->_send_message({
 		UID => $uid,
 		method => 'publish',
@@ -378,62 +384,71 @@ $client->subscribe( channel => $channel, [ uid => $uid ,] );
 
 If the channel is private (starts with a '$'), then a request to $this->{AUTH_URL} is done automatically to get the channel key.
 
-This function returns the list of UIDs used to send the command to the server. (a random string if none is provided)
+If channel contains a '&', then the function adds the client_id behind the client channel boundary. (even after a reconnect)
+
+This function returns the UIDs used to send the command to the server. (a random string if none is provided)
 
 =cut
 
 sub subscribe {
 	my ($this, %PARAMS) = @_;
-	my @channels = ( $PARAMS{channel} ); # TODO : Handle list of channels (watch out for return values)
-	my @uids;
-	foreach my $channel (@channels) {
-		push @uids, undef;
-		next if $this->{_subscribed_channels}->{ $channel };
-		next if $this->{_pending_subscriptions}->{ $channel };
-		
-		$this->{_pending_subscriptions}->{ $channel } = 1; # Don't subscribe again
-		
-		unless ($channel=~/^\$/) {
-			# Direct subscribe of not private channels
-			pop @uids;
-			push @uids, _channel_command($this,'subscribe',%PARAMS);
-			next;
-		}
-		# If the channel is private, then an API-call to /centrifuge/auth/ must be done
-		unless ($this->client_id()) {
-			my $error = "Can't subscribe to private channel '$channel' : Client is not connected";
-			print STDERR "Error in Centrifugo::Client : $error\n" if $this->{DEBUG};
-			$this->{ON}->{'error'}->($error) if $this->{ON}->{'error'};
-			next;
-		}
-		
-		# Request a channel key
-		my $data = encode_json {
-			client => $this->client_id(),
-			channels => [ $channel ]
-		};
-		my $URL = $this->{AUTH_URL};
-		http_post $URL, $data,
-			headers => {
-				contentType => "application/json"
-			},
-			sub {
-			  my ($data, $headers) = @_;
-			  warn "Couldn't connect to $URL : Status=".$headers->{Status} and return unless $headers->{Status}==200;
-			  my $result = decode_json $data;
-			  my $key = $result->{$channel}->{sign};
-			  $PARAMS{sign} = $key;
-			  # The request is now complete : {channels: ["...",...], client:"...", sign:"..."}
-			  return _channel_command($this,'subscribe',%PARAMS);
-		   };
+	my $channel = $PARAMS{channel};
+	$channel=~s/&.*/&/; # Client channel boundary
+
+	next if $this->{_subscribed_channels}->{ $channel };
+	next if $this->{_pending_subscriptions}->{ $channel };
+
+	# If the client is not connected, then delay the subscribing
+	unless ($this->client_id()) {
+		my $error = "Can't subscribe to channel '$channel' yet : Client is not connected (will try again when connected)";
+		print STDERR "Error in Centrifugo::Client : $error\n" if $this->{DEBUG};
+		$this->{ON}->{'error'}->($error) if $this->{ON}->{'error'};
+		# Register the channel so that we can subscribe when the client is connected
+		$this->{_channels}->{ $channel } = { status => JSON::false };
+		return undef;
 	}
-	return @uids;
+	$this->{_pending_subscriptions}->{ $channel } = 1; # Don't subscribe again
+
+	my $SUBREQ = {
+		channel => $channel
+	};
+	$SUBREQ->{uid} = $PARAMS{uid} if $PARAMS{uid};
+	
+	# Direct subscribe of non-private channels
+	return _channel_command($this,'subscribe',%$SUBREQ) unless $channel=~/^\$/; # Private channels starts with $
+	
+	# If the channel is private, then an API-call to /centrifuge/auth/ must be done
+	$SUBREQ->{ client } = $this->client_id();
+	
+	# Request a channel key
+	my $data = encode_json {
+		client => $this->client_id(),
+		channels => [ $channel ]
+	};
+	my $URL = $this->{AUTH_URL};
+	http_post $URL, $data,
+		headers => {
+			contentType => "application/json"
+		},
+		sub {
+		  my ($data, $headers) = @_;
+		  unless ($headers->{Status}==200) {
+		    # Can't access to URL (TODO : should we retry for this ?)
+			my $error = "Can't subscribe to channel '$channel' : Couldn't connect to $URL : Status=".$headers->{Status};
+			$this->{ON}->{'error'}->($error) if $this->{ON}->{'error'};
+			return;
+		  }
+		  my $result = decode_json $data;
+		  my $key = $result->{$channel}->{sign};
+		  $SUBREQ->{sign} = $key;
+		  # The request is now complete : {channel: "...", client:"...", sign:"..."}
+		  return _channel_command($this,'subscribe',%$SUBREQ);
+	   };
 }
 
 sub _channel_command {
 	my ($this,$command,%PARAMS) = @_;
-#	my $channel = $PARAMS{'channel'};
-#	croak("Missing channel in Centrifugo::Client->$command(...)") unless $PARAMS{'channel'};
+	$PARAMS{channel} =~s /&.*/'&' . $this->client_id()/e;  # Client channel boundary
 	my $uid = $PARAMS{'uid'} || _generate_random_id();
 	my $MSG = {
 		UID => $uid ,
@@ -576,9 +591,8 @@ sub generate_token {
 sub _send_message {
 	my ($this,$MSG)=@_;
 	$MSG = encode_json $MSG;
-	print STDERR "Centrifugo::Client : S> WebSocket : $MSG\n" if $this->{DEBUG};
+	print STDERR "Centrifugo::Client : Send > WebSocket : $MSG\n" if $this->{DEBUG_WS};
 	$this->{WSHANDLE}->send($MSG);
-	
 }
 
 
