@@ -1,6 +1,6 @@
 package Centrifugo::Client;
 
-our $VERSION = "1.04";
+our $VERSION = "1.05";
 
 use Exporter;
 our @ISA = qw(Exporter);
@@ -24,11 +24,7 @@ Centrifugo::Client
 
  $cclient -> on('connect', sub{
 		my ($infoRef)=@_;
-		print "Connected to Centrifugo version ".$infoRef->{version};
-		
-		# When connected, client_id() is defined, so we can subscribe to our private channel
-		$cclient->subscribe( '&'.$cclient->client_id() );
-		
+		print "Connected to Centrifugo version ".$infoRef->{version};		
 	}) -> on('message', sub{
 		my ($infoRef)=@_;
 		print "MESSAGE: ".encode_json $infoRef->{data};
@@ -38,6 +34,10 @@ Centrifugo::Client
 		timestamp => $TIMESTAMP,
 		token => $TOKEN
 	);
+	
+ $cclient->subscribe( channel => 'my-channel&' );
+ $cclient->subscribe( channel => 'public-channel' );
+ $cclient->subscribe( channel => '$private' );
 
  # Now start the event loop to keep the program alive
  AnyEvent->condvar->recv;

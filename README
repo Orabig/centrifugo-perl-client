@@ -42,12 +42,15 @@ EXAMPLE
 	) -> on('connect', sub{
 		my ($infoRef)=@_;
 		print "Connected to Centrifugo version ".$infoRef->{version};
-		# When connected, connect to some channel
-		$cclient->subscribe( channel=>$CHANNEL );
 	})-> on('message', sub{
 		my ($infoRef)=@_;
 		print "Received message : ".encode_json $infoRef->{data};
 	});
+	
+	# Subscription to channels are delayed until connection
+	$cclient->subscribe( channel=>'my-channel&' );
+	$cclient->subscribe( channel=>'public-channel' );
+	$cclient->subscribe( channel=>'$private' );
 
 	# Now start the event loop to keep the program alive
 	AnyEvent->condvar->recv;
