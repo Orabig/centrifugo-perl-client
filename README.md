@@ -1,35 +1,42 @@
-Centrifugo::Client
+# Centrifugo::Client : A server-side Perl client for centrifugo
 
-Centrifugo::Client : A server-side Perl client for centrifugo
-
-https://github.com/Orabig/centrifugo-perl-client
-
-This module can be used to connect to a Centrifugo server with WebSockets. (Note: it does not provide access to the HTTP API of Centrifugo)
+This module can be used to connect to a Centrifugo server with WebSockets.
+(Note: it does not provide access to the HTTP API of Centrifugo. There are many easy ways to use a REST API with Perl, so
+this was pointless)
 
 More info about Centrifugo :
 https://github.com/centrifugal/centrifugo or https://fzambia.gitbooks.io/centrifugal/content/
 
-INSTALLATION
+*Note :* this Perl library works for Centrifugo v1 ( https://github.com/centrifugal/documentation ) and is not yet compatible with v2.
+
+## INSTALLATION
 
 To install this module, run the following commands:
 
+```
 	perl Makefile.PL
 	make
 	make install
-	
+```
+
 or simply use cpanminus:
 
+```
 	cpanm Centrifugo::Client
-	
-SUPPORT AND DOCUMENTATION
+```
+
+## SUPPORT AND DOCUMENTATION
 
 After installing, you can find documentation for this module with the
 perldoc command.
 
+``` 
 	perldoc Centrifugo::Client
+```
 
-EXAMPLE
+## EXAMPLE
 
+```
 	use Centrifugo::Client;
 	use AnyEvent;
 
@@ -54,11 +61,14 @@ EXAMPLE
 
 	# Now start the event loop to keep the program alive
 	AnyEvent->condvar->recv;
-	
-Note : To connect to a Centrifugo instance, your program should first ask for a TOKEN. In production this must only be done on backend side and you should never show secret to client! 
+```
 
+Note : To connect to a Centrifugo instance, your program should first ask for a TOKEN. In production this must only be done on backend side and you should never show secret to client ! 
+
+```
     use Centrifugo::Client qw!generate_token!;
 	my $SECRET = "secret";
 	my $USER = "someUser";
 	my $TIMESTAMP = time();
     my $TOKEN = generate_token( $SECRET, $USER, $TIMESTAMP );
+```
