@@ -1,13 +1,14 @@
 package Centrifugo::Client;
 
-our $VERSION = "1.05";
+our $VERSION = "2.0_alpha";
 
 use Exporter;
 our @ISA = qw(Exporter);
 our @EXPORT = qw(generate_token);
 
 use Carp qw( croak );
-use AnyEvent::WebSocket::Client 0.40; # Version needed for reason when close. See https://github.com/plicease/AnyEvent-WebSocket-Client/issues/30
+use AnyEvent::WebSocket::Client 0.40;
+
 use AnyEvent::HTTP;
 use JSON;
 
@@ -91,6 +92,8 @@ sub new {
 	$this->{MAX_RETRY} = delete $params{max_retry} || 30;
 	$this->{RESUBSCRIBE} = ! defined $params{resubscribe} || $params{resubscribe}!~/^(0|false|no)$/i; delete $params{resubscribe};
 	$this->{RECOVER} = $params{recover} && $params{recover}!~/^(0|false|no)$/i; delete $params{recover};
+	$this->{_id} = 1;        # Unique incremental message id
+	$this->{_requests} = {}; # Pending requests by ID. When requests have received a result/error, they are removed from this hash
 	croak "Centrifugo::Client : Unknown parameter : ".join',',keys %params if %params;
 	return $this;
 }
@@ -131,9 +134,11 @@ sub connect {
 # This function (re)connects to the websocket
 sub _connect {
 	my ($this) = @_;
+	$this->_debug( "INFO : Centrifugo::Client : Connecting to $this->{WS_URL}" );
 	$this->{WEBSOCKET}->connect( $this->{WS_URL} )->cb(sub {
 		$this->{WSHANDLE} = eval { shift->recv };
 		if ($@) {
+		# Todo : Vérifier l'appel à cette fonction, la signature a changé
 			$this->_on_error($@);
 			$this->_reconnect();
 			return;
@@ -146,33 +151,32 @@ sub _connect {
 # This function is called when client is connected to the WebSocket
 sub _on_ws_connect {
 	my ($this) = @_;
-	$this->_debug( "Centrifugo::Client : WebSocket connected to $this->{WS_URL}" );
+	$this->_debug( "INFO : Centrifugo::Client : WebSocket connected to $this->{WS_URL}" );
 	
 	# define the callbacks
 	$this->{WSHANDLE}->on(each_message => sub { $this->_on_ws_message($_[1]) });
 	$this->{WSHANDLE}->on(finish => sub { $this->_on_close(($_[0])->close_reason()) });
 	$this->{WSHANDLE}->on(parse_error => sub {
 		my($cnx, $error) = @_;
-		$this->_debug( "Error in Centrifugo::Client : $error" );
+		$this->_debug( "ERROR: Centrifugo::Client : $error" );
 		$this->{ON}->{'error'}->($error) if $this->{ON}->{'error'};
 	});
 	
 	# Then, connects to Centrifugo
 	$this->_send_message( {
 		method => 'connect',
-		UID => $this->{_cnx_uid},
 		params => $this->{_cnx_params}
 	} );
 }
 
 # This function is called when client is connected to Centrifugo
 sub _on_connect {
-	my ($this, $body) = @_;
-	$this->_debug( "Centrifugo::Client : Connected to Centrifugo : ".encode_json $body );	
+	my ($this, $request, $body) = @_;
+	$this->_debug( "INFO : Centrifugo::Client : Connected to Centrifugo : ".encode_json $body );	
 	# on Connect, the client_id must be read (if available)
 	if ($body && ref($body) eq 'HASH' && $body->{client}) {
 		$this->{CLIENT_ID} = $body->{client};
-		$this->_debug( "Centrifugo::Client : CLIENT_ID=".$this->{CLIENT_ID} );
+		$this->_debug( "INFO : Centrifugo::Client : CLIENT_ID=".$this->{CLIENT_ID} );
 	}
 	$this->_init_keep_alive_timer() if $this->{MAX_ALIVE};
 	$this->_reset_reconnect_sequence();
@@ -184,22 +188,22 @@ sub _on_message {
 	my ($this, $body) = @_;
 	my $uid = $body->{uid};
 	my $channel = $body->{channel};
-	$this->_debug( "Centrifugo::Client : Message from $channel : ".encode_json $body->{data} );
-	$this->{_channels}->{ $channel }->{last} = $uid; # Keeps track of last IDs of messages
+	$this->_debug( "INFO : Centrifugo::Client : Message from $channel : ".encode_json $body->{data} );
 }
 
-# This function is called when client is connected to Centrifugo
+# This function is called when client has been subscribed in a channel
 sub _on_subscribe {
-	my ($this, $body) = @_;
-	my $channel = $body->{channel};
-	$this->_debug( "Centrifugo::Client : Subscribed to $channel : ".encode_json $body );
-	if ($body->{recovered} == JSON::true) {
+	my ($this, $request, $body) = @_;
+	my $channel = $request->{channel};
+	$this->_debug( "INFO : Centrifugo::Client : Subscribed to $channel : ".encode_json $body );
+	# READ SPECS : should hand expires, tltl, recoverable, seq, gen, epoch, publications
+	if ($body->{recovered} && $body->{recovered} == JSON::true) {
 		# Re-emits the lost messages
-		my $messages = $body->{messages};
+		my $messages = $body->{publications};
 		foreach my $message (reverse @$messages) {
-			$this->_on_message($message);
 			my $sub = $this->{ON}->{message};
-			$sub->($message) if $sub;
+			$this->_debug( "TODO : je dois tester si j'envoie le bon niveau : ".encode_json $message);
+			$sub->($channel, $message) if $sub;
 		}
 	}
 	# Keeps track of channels
@@ -211,9 +215,9 @@ sub _on_subscribe {
 
 # This function is called when client is connected to Centrifugo
 sub _on_unsubscribe {
-	my ($this, $body) = @_;
-	my $channel = $body->{channel};
-	$this->_debug( "Centrifugo::Client : Unsubscribed from $body->{channel} : ".encode_json $body );
+	my ($this, $request, $body) = @_;
+	my $channel = $request->{channel};
+	$this->_debug( "INFO : Centrifugo::Client : Unsubscribed from $channel : ".encode_json $body );
 	# Keeps track of channels
 	$channel=~s/&.*/&/; # Client channel boundary
 	delete $this->{_channels}->{ $channel };	
@@ -225,15 +229,16 @@ sub _on_unsubscribe {
 sub _resubscribe {
 	my ($this) = @_;
 	foreach my $channel (keys %{$this->{_channels}}) {
-		$this->_debug( "Centrifugo::Client : Resubscribe to $channel" );
+		$this->_debug( "INFO : Centrifugo::Client : Resubscribe to $channel" );
 		$channel=~s/&.*/&/; # Client channel boundary
 		my $params = {
 			channel => $channel
 		};
-		if ($this->{RECOVER} && $this->{_channels}->{$channel}->{last}) {
-			$params->{recover}=JSON::true;
-			$params->{last}=$this->{_channels}->{$channel}->{last};
-		}
+		# Useless in V2
+#		if ($this->{RECOVER} && $this->{_channels}->{$channel}->{last}) {
+#			$params->{recover}=JSON::true;
+#			$params->{last}=$this->{_channels}->{$channel}->{last}; 
+#		}
 		$this->subscribe( %$params );
 	}
 }
@@ -242,7 +247,7 @@ sub _resubscribe {
 sub _on_close {
 	my ($this, $message) = @_;
 	$message="(none)" unless $message;
-	$this->_debug( "Centrifugo::Client : Connection closed, reason=$message" );
+	$this->_debug( "WARN : Centrifugo::Client : Connection closed, reason=$message" );
 	$this->{ON}->{'ws_closed'}->($message) if $this->{ON}->{'ws_closed'};
 	undef $this->{_alive_handler};
 	undef $this->{WSHANDLE};
@@ -254,39 +259,54 @@ sub _on_close {
 
 # This function is called if an errors occurs with the server
 sub _on_error {
-	my ($this, @infos) = @_;
-	warn "Error in Centrifugo::Client : @infos";
-	$this->{ON}->{'error'}->(@infos) if $this->{ON}->{'error'};
+#	my ($this, @infos) = @_;
+	my ($this, $infos) = @_;
+	warn "Error in Centrifugo::Client : ".encode_json($infos);
+	$this->{ON}->{'error'}->($infos) if $this->{ON}->{'error'};
 }
 
 # This function is called once for each message received from Centrifugo
 sub _on_ws_message {
 	my ($this, $message) = @_;
-	$this->_debug_ws("Send > WebSocket : $message->{body}");
+	$this->_debug_ws("INFO : WebSocket : Rcvd < $message->{body}");
 	$this->{_last_alive_message} = time();
-	my $fullbody = decode_json($message->{body}); # The body of websocket message
-	# Handle a body containing {response} : converts into a singleton
-	if (ref($fullbody) eq 'HASH') {
-		$fullbody = [ $fullbody ];
-	}
-	# Handle the body which is now an array of response
-	foreach my $info (@$fullbody) {
-		my $uid = $info->{uid};
-		my $method = $info->{method};
-		my $body = $info->{body}; # The body of Centrifugo message
-		$this->_on_connect( $body ) if $method eq 'connect';
-		$this->_on_subscribe( $body ) if $method eq 'subscribe';
-		$this->_on_unsubscribe( $body ) if $method eq 'unsubscribe';
-		$this->_on_message( $body ) if $method eq 'message';
-
-		# Call the callback of the method
-		my $sub = $this->{ON}->{$method};
-		if ($sub) { # TODO : CHECK THIS !!!
-			# Add UID into body if available
-			if ($uid) {
-				$body->{uid}=$uid;
+	# TODO : expect to have multiple lines here (thus multiple "fullbody" objects)
+	# See specs at https://centrifugal.github.io/centrifugo/server/protocol/
+	my @message_parts = split "\n", $message->{body};
+	foreach my $body (@message_parts) {
+		my $info = decode_json($body); # The body of websocket message
+		my $result = $info->{result};
+		my $error = $info->{error};
+		if ($error) {
+			$this->_on_error( $error );		
+		} else {
+			# Get the request that was sent if there is one (message have no associated request)
+			my $id = $info->{id};
+			my $method;
+			if ($id) {
+				# When the message has an ID, this is a reply to a request
+				my $request = delete $this->{_requests}->{ $id };
+				my $method = $request->{method};
+				$this->_on_connect( $request->{params}, $result ) if $method eq 'connect';
+				$this->_on_subscribe( $request->{params}, $result ) if $method eq 'subscribe';
+				$this->_on_unsubscribe( $request->{params}, $result ) if $method eq 'unsubscribe';
+				# Call the client callback of the method
+				my $sub = $this->{ON}->{$method};
+				$sub->( $result ) if ($sub);
+			} else {
+				# When the message has no ID, this is a publication
+				my $channel = $result->{channel};
+				my $type = $result->{type}; # undef/1/2/3 for message/join/leave/unsub
+				my $data = $result->{data};
+				$type=0 unless $type;
+				my @TYPES=qw( message join leave unsub );
+				my $method=$TYPES[$type];
+				# Call the callback of the method
+				my $sub = $this->{ON}->{$method};
+				$sub->( $channel, $data ) if ($sub);
 			}
-			$sub->( $body );
+
+			
 		}
 	}
 }
@@ -305,7 +325,7 @@ sub _reconnect {
 	my ($this) = @_;
 	my $retry_after = $this->{_next_retry} > $this->{MAX_RETRY} ? $this->{MAX_RETRY} : $this->{_next_retry};
 	$retry_after = int($retry_after) if $retry_after > 3;
-	$this->_debug( "Centrifugo::Client : will reconnect after $retry_after s." );
+	$this->_debug( "INFO : Centrifugo::Client : will reconnect after $retry_after s." );
 	$this->{reconnect_handler} = AnyEvent->timer(
 		after => $retry_after,
 		cb => sub {
@@ -325,7 +345,7 @@ sub _init_keep_alive_timer {
 		cb => sub {
 			my $late = time() - $this->{_last_alive_message};
 			if ($late > $this->{MAX_ALIVE}) {
-				$this->_debug( "Sending ping (${late}s without message)" );
+				$this->_debug( "INFO : Sending ping (${late}s without message)" );
 				$this->ping();
 			}
 		}
@@ -395,25 +415,26 @@ sub subscribe {
 	my ($this, %PARAMS) = @_;
 	my $channel = $PARAMS{channel};
 	$channel=~s/&.*/&/; # Client channel boundary
-
+	$this->_debug( "DEBUG: call to subscribe on '$channel'");
 	next if $this->{_subscribed_channels}->{ $channel };
 	next if $this->{_pending_subscriptions}->{ $channel };
 
 	# If the client is not connected, then delay the subscribing
 	unless ($this->client_id()) {
 		my $error = "Can't subscribe to channel '$channel' yet : Client is not connected (will try again when connected)";
-		$this->_debug( "Error in Centrifugo::Client : $error" );
+		$this->_debug( "WARN : Centrifugo::Client : $error" );
 		$this->{ON}->{'error'}->($error) if $this->{ON}->{'error'};
 		# Register the channel so that we can subscribe when the client is connected
 		$this->{_channels}->{ $channel } = { status => JSON::false };
 		return undef;
 	}
 	$this->{_pending_subscriptions}->{ $channel } = 1; # Don't subscribe again
+	
+	$this->_debug( "INFO : Centrifugo::Client : Subscribing to $channel" );
 
 	my $SUBREQ = {
 		channel => $channel
 	};
-	$SUBREQ->{uid} = $PARAMS{uid} if $PARAMS{uid};
 	
 	# Direct subscribe of non-private channels
 	return _channel_command($this,'subscribe',%$SUBREQ) unless $channel=~/^\$/; # Private channels starts with $
@@ -583,29 +604,37 @@ INPUT : $data is a JSON string with your API commands
 sub generate_token {
 	my ($secret, @infos)=@_;
 	my $info = join'', @infos;
-	use Digest::SHA qw( hmac_sha256_hex );
-	return hmac_sha256_hex( $info, $secret );
+	# TODO : faire mieux, mais il suffit de passer un objet JSON
+	$info = '{"test":"ok"}';
+	use Crypt::JWT qw(encode_jwt);
+	return encode_jwt(payload=>$info, alg=>'HS256', key=>$secret);
 }
 
 ##### (kinda)-private functions
 
 sub _send_message {
 	my ($this,$MSG)=@_;
+	# Use and increment the ID
+	my $id = $MSG->{id} = $this->{_id}++;
+	# Save the request
+	$this->{_requests}->{ $id } = $MSG;
 	$MSG = encode_json $MSG;
-	$this->_debug_ws("Send > WebSocket : $MSG");
+	$this->_debug_ws("INFO : WebSocket : Send > $MSG");
 	$this->{WSHANDLE}->send($MSG);
 }
 
 sub _debug {
 	my ($this,$MSG)=@_;
-	local $\; $\="\n";
-	print STDERR "Centrifugo::Client : $MSG" if $this->{DEBUG};
+	my $cr=$\;$\="\n";
+	print STDERR $MSG if $this->{DEBUG};
+	$\=$cr;
 }
 
 sub _debug_ws {
 	my ($this,$MSG)=@_;
-	local $\; $\="\n";
-	print STDERR "Centrifugo::Client : $MSG" if $this->{DEBUG_WS};
+	my $cr=$\;$\="\n";
+	print STDERR $MSG if $this->{DEBUG_WS};
+	$\=$cr;
 }
 
 

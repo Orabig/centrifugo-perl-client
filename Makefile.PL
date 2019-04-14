@@ -18,7 +18,7 @@ WriteMakefile(
     PREREQ_PM          => {
         'AnyEvent::WebSocket::Client' => 0.40,
         'AnyEvent::HTTP' => 0,
-        'Digest::SHA' => 0,
+        'Crypt::JWT' => 0,
         'JSON' => 0,
     },
     dist       => { COMPRESS => 'gzip -9f', SUFFIX => 'gz', },
