@@ -375,15 +375,11 @@ sub publish {
 	my ($this, %PARAMS) = @_;
 	croak("Missing channel in Centrifugo::Client->publish(...)") unless $PARAMS{channel};
 	croak("Missing data in Centrifugo::Client->publish(...)") unless $PARAMS{data};
-	my $uid = $PARAMS{'uid'} || _generate_random_id();
-	delete $PARAMS{'uid'};
 	$PARAMS{channel}=~s/&.*/'&' . $this->client_id()/e; # Client channel boundary
 	$this->_send_message({
-		UID => $uid,
 		method => 'publish',
 		params => \%PARAMS
 	});
-	return $uid;
 }
 
 =head1 FUNCTION disconnect
